@@ -11,6 +11,7 @@
 		7404DCA02DCCF0F60064031C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7404DC9F2DCCF0F60064031C /* ContentView.swift */; };
 		7404DCA22DCCF0F70064031C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7404DCA12DCCF0F70064031C /* Assets.xcassets */; };
 		7404DCA52DCCF0F70064031C /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7404DCA42DCCF0F70064031C /* Preview Assets.xcassets */; };
+		7404DCAC2DCCF1F00064031C /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7404DCAB2DCCF1F00064031C /* AppDelegate.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -19,6 +20,7 @@
 		7404DC9F2DCCF0F60064031C /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		7404DCA12DCCF0F70064031C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		7404DCA42DCCF0F70064031C /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		7404DCAB2DCCF1F00064031C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -55,6 +57,7 @@
 				7404DC9F2DCCF0F60064031C /* ContentView.swift */,
 				7404DCA12DCCF0F70064031C /* Assets.xcassets */,
 				7404DCA32DCCF0F70064031C /* Preview Content */,
+				7404DCAB2DCCF1F00064031C /* AppDelegate.swift */,
 			);
 			path = PointCloud;
 			sourceTree = "<group>";
@@ -137,6 +140,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7404DCAC2DCCF1F00064031C /* AppDelegate.swift in Sources */,
 				7404DCA02DCCF0F60064031C /* ContentView.swift in Sources */,
 				7404DC9E2DCCF0F60064031C /* PointCloudApp.swift in Sources */,
 			);
