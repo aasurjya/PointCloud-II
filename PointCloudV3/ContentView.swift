@@ -1,6 +1,8 @@
 // ContentView.swift
 // PointCloudV3
 // Updated for high-accuracy mesh reconstruction with colorful point cloud, fixing ARKit errors
+// Further refined with improved frame capture, bilinear interpolation, and projection accuracy.
+// Key changes: Consistent use of ARCamera.projectPoint in sampleColor and option for higher res video.
 
 import SwiftUI
 import RealityKit
@@ -99,6 +101,11 @@ struct ContentView: View {
                         Button(action: {
                             arViewModel.scanStatus = .idle
                             scanningTimer = 0
+                            arViewModel.coordinator?.clearAnchors()
+                            arViewModel.coordinator?.clearFrames()
+                            if let arView = arViewModel.arView, let config = arView.session.configuration {
+                                arView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+                            }
                         }) {
                             Text("New Scan")
                                 .padding()
@@ -128,53 +135,65 @@ struct ContentView: View {
             Alert(
                 title: Text("Error"),
                 message: Text(errorMessage ?? "Unknown error"),
-                dismissButton: .default(Text("OK"))
+                dismissButton: .default(Text("OK")) {
+                    arViewModel.scanStatus = .idle
+                }
             )
         }
     }
 
-    private func startScanning() {
-        // Lock exposure for consistent lighting
-        if let device = AVCaptureDevice.default(for: .video) {
-            do {
-                try device.lockForConfiguration()
+    private func setExposure(locked: Bool) {
+        guard let device = AVCaptureDevice.default(for: .video) else {
+            print("Failed to get video device.")
+            return
+        }
+        do {
+            try device.lockForConfiguration()
+            if locked {
                 if device.isExposureModeSupported(.locked) {
                     device.exposureMode = .locked
+                    print("Exposure locked.")
+                } else {
+                     print("Exposure lock not supported.")
                 }
-                device.unlockForConfiguration()
-            } catch {
-                print("Failed to lock exposure: \(error)")
+            } else {
+                if device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                    print("Exposure set to continuous auto.")
+                } else {
+                    print("Continuous auto exposure not supported.")
+                }
             }
+            device.unlockForConfiguration()
+        } catch {
+            print("Failed to \(locked ? "lock" : "unlock") exposure: \(error.localizedDescription)")
         }
+    }
+
+    private func startScanning() {
+        setExposure(locked: true)
         
-        // Reset and start fresh
         arViewModel.coordinator?.clearAnchors()
         arViewModel.coordinator?.clearFrames()
         arViewModel.scanStatus = .scanning
         scanningTimer = 0
         timerRunning = true
         
-        // Start collecting textures
         arViewModel.coordinator?.startCollectingFrames()
     }
     
     private func cancelScanning() {
-        // Unlock exposure
-        if let device = AVCaptureDevice.default(for: .video) {
-            do {
-                try device.lockForConfiguration()
-                device.exposureMode = .continuousAutoExposure
-                device.unlockForConfiguration()
-            } catch {
-                print("Failed to unlock exposure: \(error)")
-            }
-        }
+        setExposure(locked: false)
         
+        arViewModel.coordinator?.stopCollectingFrames()
         arViewModel.scanStatus = .idle
         timerRunning = false
         scanningTimer = 0
         arViewModel.coordinator?.clearAnchors()
         arViewModel.coordinator?.clearFrames()
+        if let arView = arViewModel.arView, let config = arView.session.configuration {
+            arView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        }
     }
 
     private func finishScanning() {
@@ -182,31 +201,21 @@ struct ContentView: View {
               let coord = arViewModel.coordinator else {
             errorMessage = "ARView/session not ready"
             showError = true
+            arViewModel.scanStatus = .error
             return
         }
         
-        // Unlock exposure
-        if let device = AVCaptureDevice.default(for: .video) {
-            do {
-                try device.lockForConfiguration()
-                device.exposureMode = .continuousAutoExposure
-                device.unlockForConfiguration()
-            } catch {
-                print("Failed to unlock exposure: \(error)")
-            }
-        }
+        setExposure(locked: false)
         
-        // Stop frame collection
         coord.stopCollectingFrames()
         timerRunning = false
         arViewModel.scanStatus = .processing
         arViewModel.progressMessage = "Processing scan data..."
 
         Task {
-            // Make sure we have anchors and frames
-            guard !coord.meshAnchors.isEmpty || !coord.planeAnchors.isEmpty else {
+            guard !coord.meshAnchors.isEmpty else {
                 await MainActor.run {
-                    errorMessage = "No mesh data captured. Try scanning longer."
+                    errorMessage = "No mesh data captured. Try scanning longer and moving around the environment."
                     showError = true
                     arViewModel.scanStatus = .idle
                 }
@@ -215,28 +224,23 @@ struct ContentView: View {
             
             guard !coord.capturedFrames.isEmpty else {
                 await MainActor.run {
-                    errorMessage = "No camera frames captured. Try scanning longer."
+                    errorMessage = "No camera frames captured. This is unexpected if mesh data exists. Check frame capture logic."
                     showError = true
                     arViewModel.scanStatus = .idle
                 }
                 return
             }
 
-            // Pause session to freeze mesh
             await MainActor.run {
                 arView.session.pause()
                 arViewModel.progressMessage = "Exporting textured mesh..."
             }
 
-            // Process the collected frames and mesh
-            coord.exportMultiTexturedMesh()
+            coord.exportColoredPointCloud()
             
-            // Resume session for next scan
             await MainActor.run {
-                if let config = arView.session.configuration {
-                    arView.session.run(config)
-                }
                 arViewModel.scanStatus = .completed
+                arViewModel.progressMessage = "Scan complete. Ready for new scan or Browse."
             }
         }
     }
@@ -247,32 +251,55 @@ struct ARViewContainer: UIViewRepresentable {
     @EnvironmentObject var arViewModel: ARViewModel
 
     func makeCoordinator() -> ARSessionDelegateCoordinator {
-        let coord = ARSessionDelegateCoordinator()
+        let coord = ARSessionDelegateCoordinator(arViewModel: arViewModel)
         arViewModel.coordinator = coord
         return coord
     }
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
+        arViewModel.arView = arView
+
         var config = ARWorldTrackingConfiguration()
 
         if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
             config.sceneReconstruction = .mesh
+        } else {
+            print("❌ Device does not support scene reconstruction .mesh")
         }
         config.planeDetection = [.horizontal, .vertical]
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+             config.frameSemantics.insert(.sceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
             config.frameSemantics.insert(.smoothedSceneDepth)
+        } else {
+            print("❌ Device does not support any scene depth frame semantics.")
         }
         
-        // Optimize for high-quality textures
         config.wantsHDREnvironmentTextures = true
         config.isLightEstimationEnabled = true
+        config.environmentTexturing = .automatic
+        
+        // CORRECTED: Safely unwrap optional video format
+        if #available(iOS 16.0, *) {
+            if let recommendedFormat = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
+                config.videoFormat = recommendedFormat
+                print("Using recommended high-resolution video format.")
+            } else if let recommended4KFormat = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution { // Fallback option
+                config.videoFormat = recommended4KFormat
+                print("Using recommended 4K video format.")
+            } else {
+                print("No specific high-resolution or 4K video format available/recommended. Using default.")
+            }
+        }
+
 
         arView.session.run(config)
-        arView.debugOptions = [.showSceneUnderstanding]
-
         arView.session.delegate = context.coordinator
-        arViewModel.arView = arView
+        
+         arView.debugOptions = [.showSceneUnderstanding, .showWorldOrigin, .showFeaturePoints]
+
         return arView
     }
 
@@ -284,7 +311,6 @@ struct CapturedFrame {
     let image: CGImage
     let camera: ARCamera
     let timestamp: TimeInterval
-    let transform: simd_float4x4
     
     var debugName: String {
         return "Frame_\(Int(timestamp * 1000))"
@@ -296,477 +322,411 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
     var meshAnchors = [ARMeshAnchor]()
     var planeAnchors = [ARPlaneAnchor]()
     var capturedFrames = [CapturedFrame]()
+    
     private var collectingFrames = false
-    private var frameCollectionTimer: Timer?
-    private let frameInterval: TimeInterval = 0.3 // Faster frame capture
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     
+    private var lastFrameCaptureTime: TimeInterval = 0
+    private let desiredFrameCaptureInterval: TimeInterval = 0.1 // ~10 FPS
+
+    private weak var arViewModel: ARViewModel?
+
+    init(arViewModel: ARViewModel) {
+        self.arViewModel = arViewModel
+    }
+
     func clearAnchors() {
         meshAnchors.removeAll()
         planeAnchors.removeAll()
+        print("Cleared all anchors.")
     }
     
     func clearFrames() {
         capturedFrames.removeAll()
+        print("Cleared all captured frames.")
     }
     
     func startCollectingFrames() {
         collectingFrames = true
-        frameCollectionTimer = Timer.scheduledTimer(withTimeInterval: frameInterval, repeats: true) { [weak self] _ in
-            self?.captureCurrentFrame()
-        }
+        lastFrameCaptureTime = 0
+        print("Started collecting frames.")
     }
     
     func stopCollectingFrames() {
         collectingFrames = false
-        frameCollectionTimer?.invalidate()
-        frameCollectionTimer = nil
+        print("Stopped collecting frames. Total frames: \(capturedFrames.count)")
     }
     
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         if collectingFrames {
-            captureCurrentFrame(frame: frame)
+            if frame.timestamp - lastFrameCaptureTime >= desiredFrameCaptureInterval {
+                captureCurrentFrame(from: frame)
+                lastFrameCaptureTime = frame.timestamp
+            }
         }
     }
     
-    private func captureCurrentFrame(frame: ARFrame? = nil) {
-        guard collectingFrames,
-              let frame = frame else { return }
+    private func captureCurrentFrame(from arFrame: ARFrame) {
+        guard collectingFrames else { return }
         
-        // Convert YCbCr to RGB
-        let pixelBuffer = frame.capturedImage
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-        
+        let pixelBuffer = arFrame.capturedImage
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let colorImage = ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
-            print("❌ Failed to convert camera image to RGB")
+        
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
+            print("❌ Failed to convert camera image to RGB CGImage for \(arFrame.timestamp)")
             return
         }
         
-        // Store frame with camera transform
-        let capturedFrame = CapturedFrame(
-            image: colorImage,
-            camera: frame.camera,
-            timestamp: frame.timestamp,
-            transform: frame.camera.transform
+        let newCapturedFrame = CapturedFrame(
+            image: cgImage,
+            camera: arFrame.camera,
+            timestamp: arFrame.timestamp
         )
         
-        // Limit stored frames to avoid memory issues
-        if capturedFrames.count > 100 {
+        if capturedFrames.count >= 200 {
             capturedFrames.removeFirst()
         }
-        capturedFrames.append(capturedFrame)
-        print("📸 Captured frame \(capturedFrames.count): \(colorImage.width)x\(colorImage.height)")
+        capturedFrames.append(newCapturedFrame)
     }
     
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         for anchor in anchors {
-            if let m = anchor as? ARMeshAnchor { meshAnchors.append(m) }
-            else if let p = anchor as? ARPlaneAnchor { planeAnchors.append(p) }
+            if let meshAnchor = anchor as? ARMeshAnchor {
+                meshAnchors.append(meshAnchor)
+            } else if let planeAnchor = anchor as? ARPlaneAnchor {
+                planeAnchors.append(planeAnchor)
+            }
         }
     }
     
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
         for anchor in anchors {
-            if let m = anchor as? ARMeshAnchor,
-               let i = meshAnchors.firstIndex(where: { $0.identifier == m.identifier }) {
-                meshAnchors[i] = m
-            } else if let p = anchor as? ARPlaneAnchor,
-                      let i = planeAnchors.firstIndex(where: { $0.identifier == p.identifier }) {
-                planeAnchors[i] = p
+            if let meshAnchor = anchor as? ARMeshAnchor,
+               let index = meshAnchors.firstIndex(where: { $0.identifier == meshAnchor.identifier }) {
+                meshAnchors[index] = meshAnchor
+            } else if let planeAnchor = anchor as? ARPlaneAnchor,
+                      let index = planeAnchors.firstIndex(where: { $0.identifier == planeAnchor.identifier }) {
+                planeAnchors[index] = planeAnchor
             }
         }
     }
-    
-    private func bestFrameForPoint(_ point: SIMD3<Float>, normal: SIMD3<Float>?) -> CapturedFrame? {
+
+    private func bestFrameForPoint(_ point: SIMD3<Float>, worldNormal: SIMD3<Float>?) -> CapturedFrame? {
         guard !capturedFrames.isEmpty else { return nil }
-        
-        if capturedFrames.count == 1 {
-            return capturedFrames.first
-        }
-        
+        if capturedFrames.count == 1 { return capturedFrames.first }
+
         var bestScore: Float = -Float.greatestFiniteMagnitude
-        var bestFrame: CapturedFrame?
-        
+        var bestFrame: CapturedFrame? = nil
+
         for frame in capturedFrames {
-            let cameraPosition = SIMD3<Float>(frame.transform.columns.3.x,
-                                              frame.transform.columns.3.y,
-                                              frame.transform.columns.3.z)
-            let toCamera = normalize(cameraPosition - point)
-            var score: Float = 1.0 / (length(cameraPosition - point) + 0.1)
+            let cameraTransform = frame.camera.transform
+            let cameraPosition = SIMD3<Float>(cameraTransform.columns.3.x, cameraTransform.columns.3.y, cameraTransform.columns.3.z)
+            let pointToCamera = normalize(cameraPosition - point)
+            var score: Float = 1.0 / (distance(cameraPosition, point) + 0.01)
             
-            if let normal = normal {
-                let alignment = dot(toCamera, normalize(normal))
-                score *= max(0.3, alignment)
+            if let normal = worldNormal {
+                let alignment = dot(pointToCamera, normal)
+                score *= max(0.1, alignment)
             }
+            
+            let imageWidthCG: CGFloat = CGFloat(frame.image.width)    // CGFloat
+            let imageHeightCG: CGFloat = CGFloat(frame.image.height)  // CGFloat
             
             let projectedPoint = frame.camera.projectPoint(point,
-                                                           orientation: .portrait,
-                                                           viewportSize: CGSize(width: CGFloat(frame.image.height),
-                                                                                height: CGFloat(frame.image.width)))
-            
+                                                           orientation: .landscapeRight,
+                                                           viewportSize: CGSize(width: imageWidthCG, height: imageHeightCG))
+
+            // projectedPoint.x and .y are CGFloat here
             if projectedPoint.x < 0 || projectedPoint.y < 0 ||
-                projectedPoint.x > CGFloat(frame.image.height) || projectedPoint.y > CGFloat(frame.image.width) {
-                score *= 0.1
+               projectedPoint.x >= imageWidthCG || projectedPoint.y >= imageHeightCG { // Compare CGFloat with CGFloat
+                score *= 0.05
+            } else {
+                // CORRECTED: Ensure all calculations for centerDist use Float consistently
+                let projectedX_Float = Float(projectedPoint.x)
+                let projectedY_Float = Float(projectedPoint.y)
+                let imageWidth_Float = Float(imageWidthCG)
+                let imageHeight_Float = Float(imageHeightCG)
+
+                let dx = projectedX_Float - imageWidth_Float / 2
+                let dy = projectedY_Float - imageHeight_Float / 2
+                let centerDist = sqrt(dx*dx + dy*dy) // dx, dy are Float, centerDist is Float
+                score *= (1.0 - min(0.5, centerDist / (max(imageWidth_Float, imageHeight_Float)))) // All Floats here
             }
-            
+
             if score > bestScore {
                 bestScore = score
                 bestFrame = frame
             }
         }
-        
         return bestFrame ?? capturedFrames.last
     }
     
-    //    private func sampleColor(worldPoint: SIMD3<Float>, frame: CapturedFrame) -> SIMD3<UInt8> {
-    //        let cam = frame.camera
-    //        let projSize = CGSize(width: cam.imageResolution.height,
-    //                             height: cam.imageResolution.width)
-    //
-    //        let proj = cam.projectPoint(worldPoint,
-    //                                   orientation: .portrait,
-    //                                   viewportSize: projSize)
-    //
-    //        let u = proj.x / projSize.width
-    //        let v = 1.0 - (proj.y / projSize.height)
-    //
-    //        if u < 0 || u > 1 || v < 0 || v > 1 {
-    //            return SIMD3<UInt8>(128, 128, 128)
-    //        }
-    //
-    //        let x = Int(u * CGFloat(frame.image.width))
-    //        let y = Int(v * CGFloat(frame.image.height))
-    //
-    //        guard x >= 0, y >= 0, x < frame.image.width, y < frame.image.height,
-    //              let data = frame.image.dataProvider?.data,
-    //              let ptr = CFDataGetBytePtr(data) else {
-    //            return SIMD3<UInt8>(128, 128, 128)
-    //        }
-    //
-    //        let rowBytes = frame.image.bytesPerRow
-    //        let offset = y * rowBytes + x * 4 // RGBA
-    //        let r = ptr[offset]
-    //        let g = ptr[offset + 1]
-    //        let b = ptr[offset + 2]
-    //
-    //        return SIMD3<UInt8>(r, g, b)
-    //    }
-    
     private func sampleColor(worldPoint: SIMD3<Float>, frame: CapturedFrame) -> SIMD3<UInt8> {
         let camera = frame.camera
-        let pointInCamera = camera.transform.inverse * SIMD4<Float>(worldPoint, 1)
+        let imageWidthCG = CGFloat(frame.image.width)   // This is CGFloat
+        let imageHeightCG = CGFloat(frame.image.height) // This is CGFloat
+
+        let projectedPt = camera.projectPoint(worldPoint,
+                                              orientation: .landscapeRight,
+                                              viewportSize: CGSize(width: imageWidthCG, height: imageHeightCG))
         
-        // Check if point is behind camera
-        if pointInCamera.z <= 0 {
+        let pointInCameraSpace = camera.transform.inverse * SIMD4<Float>(worldPoint.x, worldPoint.y, worldPoint.z, 1.0)
+        if pointInCameraSpace.z >= 0 {
             return SIMD3<UInt8>(128, 128, 128)
         }
-        
-        // Project using intrinsics
-        let xNorm = pointInCamera.x / pointInCamera.z
-        let yNorm = pointInCamera.y / pointInCamera.z
-        let intrinsics = camera.intrinsics
-        let u = intrinsics[0][0] * xNorm + intrinsics[0][2]
-        let v = intrinsics[1][1] * yNorm + intrinsics[1][2]
-        
-        // Convert image dimensions to Float
-        let imageWidth = Float(frame.image.width)
-        let imageHeight = Float(frame.image.height)
-        
-        // Check bounds
-        if u < 0 || u >= imageWidth || v < 0 || v >= imageHeight {
+
+        // CORRECTED: Convert projectedPt components (CGFloat) to Float
+        let u_exact = Float(projectedPt.x)
+        let v_exact = Float(projectedPt.y)
+
+        // CORRECTED: Compare u_exact (Float) with Float versions of image dimensions
+        if u_exact < 0 || u_exact >= Float(imageWidthCG) - 1 || v_exact < 0 || v_exact >= Float(imageHeightCG) - 1 {
             return SIMD3<UInt8>(128, 128, 128)
         }
-        
-        let x = Int(u)
-        let y = Int(v)
-        
-        guard let data = frame.image.dataProvider?.data,
+
+        guard let dataProvider = frame.image.dataProvider,
+              let data = dataProvider.data,
               let ptr = CFDataGetBytePtr(data) else {
+            print("❌ Failed to get image data for \(frame.debugName) during color sampling.")
             return SIMD3<UInt8>(128, 128, 128)
         }
+
+        let bytesPerRow = frame.image.bytesPerRow
+        let bytesPerPixel = frame.image.bitsPerPixel / 8
+        if bytesPerPixel != 4 {
+            print("Warning: Expected 4 bytes per pixel (RGBA), got \(bytesPerPixel) for \(frame.debugName)")
+            return SIMD3<UInt8>(100,100,100);
+        }
+
+        let x0 = Int(floor(u_exact))
+        let y0 = Int(floor(v_exact))
+
+        let u_ratio = u_exact - Float(x0)
+        let v_ratio = v_exact - Float(y0)
+        let u_opposite = 1 - u_ratio
+        let v_opposite = 1 - v_ratio
+
+        func getColorComponentAt(x: Int, y: Int, componentOffset: Int) -> Float {
+            let offset = y * bytesPerRow + x * bytesPerPixel + componentOffset
+            guard offset < CFDataGetLength(data) && offset >= 0 else { // Added check for offset >= 0
+                print("Warning: Calculated offset \(offset) is out of bounds for image data of length \(CFDataGetLength(data)). Frame: \(frame.debugName), Point: (\(x),\(y))")
+                return 128.0
+            }
+            return Float(ptr[offset])
+        }
+
+        let r00 = getColorComponentAt(x: x0, y: y0, componentOffset: 0)
+        let g00 = getColorComponentAt(x: x0, y: y0, componentOffset: 1)
+        let b00 = getColorComponentAt(x: x0, y: y0, componentOffset: 2)
+
+        let r10 = getColorComponentAt(x: x0 + 1, y: y0, componentOffset: 0)
+        let g10 = getColorComponentAt(x: x0 + 1, y: y0, componentOffset: 1)
+        let b10 = getColorComponentAt(x: x0 + 1, y: y0, componentOffset: 2)
+
+        let r01 = getColorComponentAt(x: x0, y: y0 + 1, componentOffset: 0)
+        let g01 = getColorComponentAt(x: x0, y: y0 + 1, componentOffset: 1)
+        let b01 = getColorComponentAt(x: x0, y: y0 + 1, componentOffset: 2)
+
+        let r11 = getColorComponentAt(x: x0 + 1, y: y0 + 1, componentOffset: 0)
+        let g11 = getColorComponentAt(x: x0 + 1, y: y0 + 1, componentOffset: 1)
+        let b11 = getColorComponentAt(x: x0 + 1, y: y0 + 1, componentOffset: 2)
+
+        let r_top = r00 * u_opposite + r10 * u_ratio
+        let r_bottom = r01 * u_opposite + r11 * u_ratio
+        let final_r = r_top * v_opposite + r_bottom * v_ratio
+
+        let g_top = g00 * u_opposite + g10 * u_ratio
+        let g_bottom = g01 * u_opposite + g11 * u_ratio
+        let final_g = g_top * v_opposite + g_bottom * v_ratio
+
+        let b_top = b00 * u_opposite + b10 * u_ratio
+        let b_bottom = b01 * u_opposite + b11 * u_ratio
+        let final_b = b_top * v_opposite + b_bottom * v_ratio
         
-        let rowBytes = frame.image.bytesPerRow
-        let offset = y * rowBytes + x * 4 // RGBA
-        let r = ptr[offset]
-        let g = ptr[offset + 1]
-        let b = ptr[offset + 2]
-        
-        return SIMD3<UInt8>(r, g, b)
+        return SIMD3<UInt8>(UInt8(clamping: Int(round(final_r))),
+                               UInt8(clamping: Int(round(final_g))),
+                               UInt8(clamping: Int(round(final_b))))
     }
     
-    func exportMultiTexturedMesh() {
-        //        print("Starting export with \(meshAnchors.count) mesh anchors, \(planeAnchors.count) plane anchors, and \(capturedFrames.count) frames")
-        //        guard !meshAnchors.isEmpty || !planeAnchors.isEmpty else {
-        //            print("❌ No anchors collected. Try scanning longer.")
-        //            return
-        //        }
-        //
-        //        guard !capturedFrames.isEmpty else {
-        //            print("❌ No frames collected. Try scanning longer.")
-        //            return
-        //        }
-        //
-        //        var vertices = [(SIMD3<Float>, SIMD3<UInt8>)]()
-        //        var faces = [(Int, Int, Int)]()
-        //        var faceNormals = [SIMD3<Float>]()
-        //
-        //        for anchorIndex in 0..<meshAnchors.count {
-        //            let anchor = meshAnchors[anchorIndex]
-        //            let geo = anchor.geometry
-        //            let vb = geo.vertices.buffer.contents()
-        //            let off = geo.vertices.offset
-        //            let str = geo.vertices.stride
-        //            let base = vertices.count
-        //
-        //            print("Processing mesh anchor \(anchorIndex+1)/\(meshAnchors.count): \(geo.vertices.count) vertices")
-        //
-        //            var worldVertices = [SIMD3<Float>]()
-        //            for i in 0..<geo.vertices.count {
-        //                let ptr = vb.advanced(by: off + i * str)
-        //                var vtxLocal = SIMD3<Float>()
-        //                memcpy(&vtxLocal, ptr, MemoryLayout<SIMD3<Float>>.size)
-        //                let world4 = anchor.transform * SIMD4<Float>(vtxLocal, 1)
-        //                let worldPos = SIMD3<Float>(world4.x, world4.y, world4.z)
-        //                worldVertices.append(worldPos)
-        //            }
-        //
-        //            let fb = geo.faces.buffer.contents()
-        //            let bpi = geo.faces.bytesPerIndex
-        //            for i in 0..<geo.faces.count {
-        //                var idxs = [Int](repeating: 0, count: 3)
-        //                for j in 0..<3 {
-        //                    let ptr = fb.advanced(by: i * 3 * bpi + j * bpi)
-        //                    let rawIndex: UInt32
-        //                    switch bpi {
-        //                    case 1:
-        //                        rawIndex = UInt32(ptr.load(as: UInt8.self))
-        //                    case 2:
-        //                        rawIndex = UInt32(ptr.load(as: UInt16.self))
-        //                    case 4:
-        //                        rawIndex = ptr.load(as: UInt32.self)
-        //                    default:
-        //                        rawIndex = 0
-        //                    }
-        //                    idxs[j] = Int(rawIndex)
-        //                }
-        //
-        //                if idxs.allSatisfy({ $0 < worldVertices.count }) {
-        //                    let v0 = worldVertices[idxs[0]]
-        //                    let v1 = worldVertices[idxs[1]]
-        //                    let v2 = worldVertices[idxs[2]]
-        //                    let edge1 = v1 - v0
-        //                    let edge2 = v2 - v0
-        //                    var normal = normalize(cross(edge1, edge2))
-        //
-        //                    let faceCenter = (v0 + v1 + v2) / 3.0
-        //                    let toCenter = normalize(SIMD3<Float>(0, 0, 0) - faceCenter)
-        //                    if dot(normal, toCenter) > 0 {
-        //                        normal = -normal
-        //                    }
-        //
-        //                    faceNormals.append(normal)
-        //                    faces.append((idxs[0] + base, idxs[1] + base, idxs[2] + base))
-        //                }
-        //            }
-        //
-        //            for i in 0..<geo.vertices.count {
-        //                let worldPos = worldVertices[i]
-        //
-        //                let vertexFaces = faces.enumerated().filter { $0.element.0 == i || $0.element.1 == i || $0.element.2 == i }.map { $0.offset }
-        //                let avgNormal = vertexFaces.reduce(SIMD3<Float>(0, 0, 0)) { (sum, faceIdx) in
-        //                    sum + faceNormals[faceIdx]
-        //                } / Float(max(1, vertexFaces.count))
-        //
-        //                let bestFrame = bestFrameForPoint(worldPos, normal: avgNormal)
-        //                let color: SIMD3<UInt8> = bestFrame != nil ? sampleColor(worldPoint: worldPos, frame: bestFrame!) : SIMD3<UInt8>(128, 128, 128)
-        //
-        //                vertices.append((worldPos, color))
-        //            }
-        //        }
-        //
-        //        guard vertices.count > 0, faces.count > 0 else {
-        //            print("❌ Invalid mesh: \(vertices.count) vertices, \(faces.count) faces")
-        //            return
-        //        }
-        //
-        //        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        //        let timestamp = Int(Date().timeIntervalSince1970)
-        //        let fileURL = docs.appendingPathComponent("ColoredMesh_\(timestamp).ply")
-        //        var ply = """
-        //ply
-        //format ascii 1.0
-        //element vertex \(vertices.count)
-        //property float x
-        //property float y
-        //property float z
-        //property uchar red
-        //property uchar green
-        //property uchar blue
-        //element face \(faces.count)
-        //property list uchar int vertex_indices
-        //end_header
-        //"""
-        //        for (pos, col) in vertices {
-        //            ply += "\n\(pos.x) \(pos.y) \(pos.z) \(col.x) \(col.y) \(col.z)"
-        //        }
-        //
-        //        for (a, b, c) in faces {
-        //            ply += "\n3 \(a) \(b) \(c)"
-        //        }
-        //
-        //        do {
-        //            try ply.write(to: fileURL, atomically: true, encoding: .utf8)
-        //            print("✅ Saved to \(fileURL.lastPathComponent) with \(vertices.count) vertices and \(faces.count) faces")
-        //        } catch {
-        //            print("❌ Write error: \(error)")
-        //        }
-        //    }
-        //
-        //    func session(_ session: ARSession, didFailWithError error: Error) {
-        //        print("❌ ARSession failed: \(error.localizedDescription)")
-        //    }
-        //
-        //    func sessionWasInterrupted(_ session: ARSession) {
-        //        print("⚠️ Interrupted")
-        //    }
-        //
-        //    func sessionInterruptionEnded(_ session: ARSession) {
-        //        print("✅ Resumed")
-        //    }
-        //        func exportColoredPointCloud() {
+    func exportColoredPointCloud() {
+        arViewModel?.progressMessage = "Preparing to export... Mesh Anchors: \(meshAnchors.count), Frames: \(capturedFrames.count)"
+        print("Starting export with \(meshAnchors.count) mesh anchors and \(capturedFrames.count) frames.")
+        
+        guard !meshAnchors.isEmpty else {
+            print("❌ No mesh anchors collected. Cannot export point cloud.")
+            arViewModel?.progressMessage = "Error: No mesh data."
+            return
+        }
+        
+        guard !capturedFrames.isEmpty else {
+            print("❌ No frames collected. Cannot color point cloud.")
+            arViewModel?.progressMessage = "Error: No camera frames for texturing."
+            return
+        }
 
-            print("Starting export with \(meshAnchors.count) mesh anchors and \(capturedFrames.count) frames")
-            
-            guard !meshAnchors.isEmpty else {
-                print("❌ No mesh anchors collected. Try scanning longer.")
-                return
+        var verticesWithColor = [(position: SIMD3<Float>, color: SIMD3<UInt8>)]()
+        var defaultColorCount = 0
+        var totalVerticesProcessed = 0
+
+        for (anchorIndex, anchor) in meshAnchors.enumerated() {
+            arViewModel?.progressMessage = "Processing anchor \(anchorIndex + 1)/\(meshAnchors.count)..."
+            let geometry = anchor.geometry // This is ARMeshGeometry
+            let transform = anchor.transform
+
+            // Extract vertices
+            let vertices = geometry.vertices // This is ARGeometrySource
+            let verticesBuffer = vertices.buffer.contents() // MTLBuffer contents, advance by offset
+            let verticesOffset = vertices.offset // Offset for this source in the MTLBuffer
+            let verticesStride = vertices.stride
+            var localVertices = [SIMD3<Float>]()
+            for i in 0..<vertices.count {
+                let vertexPointer = verticesBuffer.advanced(by: verticesOffset + i * verticesStride)
+                localVertices.append(vertexPointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee)
             }
-            
-            guard !capturedFrames.isEmpty else {
-                print("❌ No frames collected. Try scanning longer.")
-                return
-            }
+            totalVerticesProcessed += localVertices.count
 
-            var vertices = [(SIMD3<Float>, SIMD3<UInt8>)]()
-            var defaultColorCount = 0
-
-            for anchor in meshAnchors {
-                let geo = anchor.geometry
-                let transform = anchor.transform
-
-                // Extract vertices
-                let vb = geo.vertices.buffer.contents()
-                var localVertices = [SIMD3<Float>]()
-                for i in 0..<geo.vertices.count {
-                    let ptr = vb.advanced(by: geo.vertices.offset + i * geo.vertices.stride)
-                    var vtx = SIMD3<Float>()
-                    memcpy(&vtx, ptr, MemoryLayout<SIMD3<Float>>.size)
-                    localVertices.append(vtx)
-                }
-
-                // Extract faces (assuming triangles)
-                let fb = geo.faces.buffer.contents()
-                var faces = [[Int]]()
-                for i in 0..<geo.faces.count {
-                    var face = [Int]()
-                    for j in 0..<geo.faces.indexCountPerPrimitive {
-                        let index = fb.advanced(by: i * geo.faces.indexCountPerPrimitive * 4 + j * 4).load(as: UInt32.self)
-                        face.append(Int(index))
+            // Extract faces
+            let faces = geometry.faces // This is ARGeometryElement
+            let facesBuffer = faces.buffer.contents() // MTLBuffer contents for faces
+            // CORRECTED: ARGeometryElement (faces) does not have an 'offset' property.
+            // The 'faces.buffer' is the specific buffer for face indices, starting at its own 0.
+            let indicesPerFace = faces.indexCountPerPrimitive
+            var parsedFaces = [[Int]]()
+            if faces.bytesPerIndex == 4 {
+                 for i in 0..<faces.count { // faces.count is the number of primitives (triangles)
+                    var faceIndices = [Int]()
+                    for j in 0..<indicesPerFace { // indicesPerFace is usually 3
+                        // Calculate byte offset from the start of the facesBuffer
+                        let byteOffset = (i * indicesPerFace + j) * MemoryLayout<UInt32>.size
+                        let indexPointer = facesBuffer.advanced(by: byteOffset)
+                        faceIndices.append(Int(indexPointer.assumingMemoryBound(to: UInt32.self).pointee))
                     }
-                    faces.append(face)
+                    parsedFaces.append(faceIndices)
                 }
+            } else if faces.bytesPerIndex == 2 { // Handle UInt16 indices as well
+                 for i in 0..<faces.count {
+                    var faceIndices = [Int]()
+                    for j in 0..<indicesPerFace {
+                        let byteOffset = (i * indicesPerFace + j) * MemoryLayout<UInt16>.size
+                        let indexPointer = facesBuffer.advanced(by: byteOffset)
+                        faceIndices.append(Int(indexPointer.assumingMemoryBound(to: UInt16.self).pointee))
+                    }
+                    parsedFaces.append(faceIndices)
+                }
+            } else {
+                 print("⚠️ Unsupported face index format: bytesPerIndex = \(faces.bytesPerIndex)")
+            }
 
-                // Compute face normals
-                var faceNormals = [SIMD3<Float>]()
-                for face in faces {
+
+            var vertexNormals = [SIMD3<Float>](repeating: .zero, count: localVertices.count)
+            if !parsedFaces.isEmpty && !localVertices.isEmpty {
+                for face in parsedFaces {
+                    guard face.count == 3,
+                          face[0] < localVertices.count, face[1] < localVertices.count, face[2] < localVertices.count else { continue }
                     let v0 = localVertices[face[0]]
                     let v1 = localVertices[face[1]]
                     let v2 = localVertices[face[2]]
-                    let edge1 = v1 - v0
-                    let edge2 = v2 - v0
-                    let normal = normalize(cross(edge1, edge2))
-                    faceNormals.append(normal)
-                }
-
-                // Compute vertex normals
-                var vertexNormals = [SIMD3<Float>](repeating: .zero, count: localVertices.count)
-                for faceIndex in 0..<faces.count {
-                    let face = faces[faceIndex]
-                    let normal = faceNormals[faceIndex]
-                    for vertexIndex in face {
-                        vertexNormals[vertexIndex] += normal
-                    }
+                    let faceNormal = normalize(cross(v1 - v0, v2 - v0))
+                    vertexNormals[face[0]] += faceNormal
+                    vertexNormals[face[1]] += faceNormal
+                    vertexNormals[face[2]] += faceNormal
                 }
                 for i in 0..<vertexNormals.count {
-                    vertexNormals[i] = normalize(vertexNormals[i])
-                }
-
-                // Process vertices
-                for i in 0..<localVertices.count {
-                    let vtxLocal = localVertices[i]
-                    let normalLocal = vertexNormals[i]
-
-                    // Transform to world space
-                    let world4 = transform * SIMD4<Float>(vtxLocal, 1)
-                    let worldPos = SIMD3<Float>(world4.x, world4.y, world4.z)
-                    let rotation = float3x3(
-                        SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
-                        SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
-                        SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
-                    )
-                    let worldNormal = normalize(rotation * normalLocal)
-
-                    // Get best frame and color
-                    let bestFrame = bestFrameForPoint(worldPos, normal: worldNormal)
-                    let color: SIMD3<UInt8>
-                    if let frame = bestFrame {
-                        color = sampleColor(worldPoint: worldPos, frame: frame)
-                    } else {
-                        color = SIMD3<UInt8>(128, 128, 128)
-                        defaultColorCount += 1
-                    }
-                    
-                    vertices.append((worldPos, color))
-                    
-                    if i < 5 {
-                        print("Point \(i): position \(worldPos), color \(color)")
+                    if length_squared(vertexNormals[i]) > .ulpOfOne {
+                         vertexNormals[i] = normalize(vertexNormals[i])
                     }
                 }
+            } else {
+                print("Warning: No faces or local vertices to compute normals for anchor \(anchor.identifier).")
             }
 
-            print("Vertices with default color: \(defaultColorCount) out of \(vertices.count)")
-            
-            guard vertices.count > 0 else {
-                print("❌ No vertices collected.")
-                return
-            }
-            
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let timestamp = Int(Date().timeIntervalSince1970)
-            let fileURL = docs.appendingPathComponent("ColoredPointCloud_\(timestamp).ply")
-            var ply = """
-            ply
-            format ascii 1.0
-            element vertex \(vertices.count)
-            property float x
-            property float y
-            property float z
-            property uchar red
-            property uchar green
-            property uchar blue
-            end_header
-            """
-            for (pos, col) in vertices {
-                ply += "\n\(pos.x) \(pos.y) \(pos.z) \(col.x) \(col.y) \(col.z)"
-            }
-            
-            do {
-                try ply.write(to: fileURL, atomically: true, encoding: .utf8)
-                print("✅ Saved point cloud to \(fileURL.lastPathComponent) with \(vertices.count) points")
-            } catch {
-                print("❌ Write error: \(error)")
+            for i in 0..<localVertices.count {
+                let localVertex = localVertices[i]
+                let localNormal = (i < vertexNormals.count && length_squared(vertexNormals[i]) > .ulpOfOne) ? vertexNormals[i] : nil
+
+                let worldVertex4 = transform * SIMD4<Float>(localVertex.x, localVertex.y, localVertex.z, 1.0)
+                let worldVertex = SIMD3<Float>(worldVertex4.x, worldVertex4.y, worldVertex4.z) / worldVertex4.w
+
+                var worldNormal: SIMD3<Float>? = nil
+                if let ln = localNormal {
+                     let rotationMatrix = simd_float3x3(columns: (transform.columns.0.xyz,
+                                                                transform.columns.1.xyz,
+                                                                transform.columns.2.xyz))
+                    if length_squared(ln) > .ulpOfOne { // Ensure ln is not zero before normalizing
+                        worldNormal = normalize(rotationMatrix * ln)
+                    }
+                }
+                
+                var sampledColor: SIMD3<UInt8>
+                if let bestFrameForVertex = bestFrameForPoint(worldVertex, worldNormal: worldNormal) {
+                    sampledColor = sampleColor(worldPoint: worldVertex, frame: bestFrameForVertex)
+                } else {
+                    sampledColor = SIMD3<UInt8>(128, 128, 128)
+                    defaultColorCount += 1
+                }
+                verticesWithColor.append((position: worldVertex, color: sampledColor))
             }
         }
+        arViewModel?.progressMessage = "Finalizing export..."
+        print("Processed \(totalVerticesProcessed) raw vertices across all anchors.")
+        print("Vertices with default color: \(defaultColorCount) out of \(verticesWithColor.count)")
+        
+        guard !verticesWithColor.isEmpty else {
+            print("❌ No vertices collected for PLY export.")
+            arViewModel?.progressMessage = "Error: No vertices to export."
+            return
+        }
+        
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let fileName = "ColoredPointCloud_\(timestamp).ply"
+        
+        var plyHeader = """
+        ply
+        format ascii 1.0
+        element vertex \(verticesWithColor.count)
+        property float x
+        property float y
+        property float z
+        property uchar red
+        property uchar green
+        property uchar blue
+        end_header
+        """
+        
+        var plyBody = ""
+        for vertexData in verticesWithColor {
+            plyBody += "\n\(vertexData.position.x) \(vertexData.position.y) \(vertexData.position.z) \(vertexData.color.x) \(vertexData.color.y) \(vertexData.color.z)"
+        }
+        
+        let fullPlyContent = plyHeader + plyBody
+        
+        do {
+            let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let fileURL = documentsDirectory.appendingPathComponent(fileName)
+            try fullPlyContent.write(to: fileURL, atomically: true, encoding: .utf8)
+            print("✅ Saved colored point cloud to \(fileURL.lastPathComponent) with \(verticesWithColor.count) points.")
+            arViewModel?.progressMessage = "Exported to \(fileName)"
+        } catch {
+            print("❌ Error writing PLY file: \(error.localizedDescription)")
+            arViewModel?.progressMessage = "Error: Could not save file."
+        }
+    }
+}
+
+extension SIMD4 {
+    var xyz: SIMD3<Scalar> {
+        return SIMD3<Scalar>(x, y, z)
+    }
+}
+
+extension UInt8 {
+    init(clamping value: Int) {
+        if value < 0 {
+            self = 0
+        } else if value > UInt8.max {
+            self = UInt8.max
+        } else {
+            self = UInt8(value)
+        }
+    }
 }
