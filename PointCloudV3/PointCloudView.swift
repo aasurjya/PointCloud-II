@@ -1,12 +1,10 @@
-
 // PointCloudView.swift
 // PointCloudV3
-// Created by ihub-devs on 13/05/25.
+// Updated for rendering high-accuracy colored mesh
 
 import SwiftUI
 import SceneKit
 
-/// SwiftUI view that presents a SceneKit-based point-cloud viewer in a sheet.
 struct PointCloudView: View {
     let plyURL: URL
     @Environment(\.presentationMode) private var presentationMode
@@ -31,9 +29,6 @@ struct PointCloudView: View {
     }
 }
 
-
-/// UIViewRepresentable that loads an ASCII-PLY file and renders it as true SceneKit points,
-/// plus adds camera, lighting, and a floor for better visibility.
 struct SceneKitColoredMeshScene: UIViewRepresentable {
     let plyURL: URL
 
@@ -42,6 +37,7 @@ struct SceneKitColoredMeshScene: UIViewRepresentable {
         scnView.scene = SCNScene()
         scnView.allowsCameraControl = true
         scnView.backgroundColor = .black
+        scnView.antialiasingMode = .multisampling4X
 
         if let node = makeMeshNode() {
             scnView.scene?.rootNode.addChildNode(node)
@@ -49,16 +45,25 @@ struct SceneKitColoredMeshScene: UIViewRepresentable {
             // Add camera
             let cameraNode = SCNNode()
             cameraNode.camera = SCNCamera()
-            cameraNode.position = SCNVector3(0, 0, 1)
+            cameraNode.camera?.fieldOfView = 60
+            cameraNode.position = SCNVector3(0, 0, 2)
             scnView.scene?.rootNode.addChildNode(cameraNode)
             scnView.pointOfView = cameraNode
 
-            // Lighting
-            let light = SCNNode()
-            light.light = SCNLight()
-            light.light?.type = .ambient
-            light.light?.color = UIColor.white
-            scnView.scene?.rootNode.addChildNode(light)
+            // Add lighting
+            let ambientLight = SCNNode()
+            ambientLight.light = SCNLight()
+            ambientLight.light?.type = .ambient
+            ambientLight.light?.intensity = 500
+            scnView.scene?.rootNode.addChildNode(ambientLight)
+
+            let directionalLight = SCNNode()
+            directionalLight.light = SCNLight()
+            directionalLight.light?.type = .directional
+            directionalLight.light?.intensity = 1000
+            directionalLight.position = SCNVector3(10, 10, 10)
+            directionalLight.look(at: SCNVector3(0, 0, 0))
+            scnView.scene?.rootNode.addChildNode(directionalLight)
         }
 
         return scnView
@@ -67,25 +72,28 @@ struct SceneKitColoredMeshScene: UIViewRepresentable {
     func updateUIView(_ uiView: SCNView, context: Context) {}
 
     private func makeMeshNode() -> SCNNode? {
-        guard
-            let text = try? String(contentsOf: plyURL, encoding: .utf8),
-            let headerEnd = text.range(of: "end_header\n")
-        else { return nil }
+        guard let text = try? String(contentsOf: plyURL, encoding: .utf8),
+              let headerEnd = text.range(of: "end_header\n") else {
+            print("❌ Failed to load PLY file")
+            return nil
+        }
 
         let lines = text[headerEnd.upperBound...].split(separator: "\n")
         let header = text[..<headerEnd.lowerBound]
-        guard
-            let vertexLine = header.split(separator: "\n").first(where: { $0.contains("element vertex") }),
-            let faceLine = header.split(separator: "\n").first(where: { $0.contains("element face") }),
-            let vertexCount = Int(vertexLine.split(separator: " ").last ?? ""),
-            let faceCount = Int(faceLine.split(separator: " ").last ?? "")
-        else { return nil }
+        guard let vertexLine = header.split(separator: "\n").first(where: { $0.contains("element vertex") }),
+              let faceLine = header.split(separator: "\n").first(where: { $0.contains("element face") }),
+              let vertexCount = Int(vertexLine.split(separator: " ").last ?? ""),
+              let faceCount = Int(faceLine.split(separator: " ").last ?? "") else {
+            print("❌ Invalid PLY header")
+            return nil
+        }
 
         let vertexLines = lines.prefix(vertexCount)
         let faceLines = lines.dropFirst(vertexCount).prefix(faceCount)
 
         var verts = [SCNVector3]()
         var colors = [SCNVector3]()
+        var indices = [UInt32]()
 
         for line in vertexLines {
             let comps = line.split(separator: " ")
@@ -95,21 +103,29 @@ struct SceneKitColoredMeshScene: UIViewRepresentable {
                   let z = Float(comps[2]),
                   let r = Float(comps[3]),
                   let g = Float(comps[4]),
-                  let b = Float(comps[5])
-            else { continue }
+                  let b = Float(comps[5]) else {
+                print("⚠️ Skipping invalid vertex line: \(line)")
+                continue
+            }
             verts.append(SCNVector3(x, y, z))
             colors.append(SCNVector3(r/255, g/255, b/255))
         }
 
-        var indices: [UInt32] = []
         for line in faceLines {
             let comps = line.split(separator: " ")
             guard comps.count == 4, comps[0] == "3",
                   let i0 = UInt32(comps[1]),
                   let i1 = UInt32(comps[2]),
-                  let i2 = UInt32(comps[3])
-            else { continue }
+                  let i2 = UInt32(comps[3]) else {
+                print("⚠️ Skipping invalid face line: \(line)")
+                continue
+            }
             indices.append(contentsOf: [i0, i1, i2])
+        }
+
+        guard !verts.isEmpty, !indices.isEmpty else {
+            print("❌ No valid vertices or faces in PLY")
+            return nil
         }
 
         let vertexSource = SCNGeometrySource(vertices: verts)
@@ -131,10 +147,9 @@ struct SceneKitColoredMeshScene: UIViewRepresentable {
 
         let geometry = SCNGeometry(sources: [vertexSource, colorSource], elements: [element])
         geometry.firstMaterial?.isDoubleSided = true
-        geometry.firstMaterial?.lightingModel = .blinn
+        geometry.firstMaterial?.lightingModel = .physicallyBased
+        geometry.firstMaterial?.diffuse.contents = UIColor.white // Use vertex colors
 
         return SCNNode(geometry: geometry)
     }
 }
-
-

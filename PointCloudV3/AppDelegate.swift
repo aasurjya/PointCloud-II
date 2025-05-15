@@ -1,9 +1,8 @@
-//
-//  AppDelegate.swift
-//  PointCloudV3
-//
-//  Created by ihub-devs on 08/05/25.
-//
+// AppDelegate.swift
+// PointCloudV3
+// Created by ihub-devs on 08/05/25.
+// Updated for high-accuracy reconstruction and colorful point cloud
+
 import UIKit
 import SwiftUI
 
