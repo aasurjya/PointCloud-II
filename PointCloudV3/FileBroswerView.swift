@@ -85,6 +85,7 @@ import SwiftUI
 import RealityKit
 import ARKit
 
+// Allow URL to work with .sheet(item:)
 extension URL: Identifiable {
     public var id: String { absoluteString }
 }
@@ -93,31 +94,75 @@ struct FileBrowserView: View {
     @EnvironmentObject var arViewModel: ARViewModel
     @Environment(\.presentationMode) var presentationMode
     @State private var plyFiles: [URL] = []
+    @State private var inProgressScans: [ScanMetadata] = []
     @State private var loadErrorMessage: String?
     @State private var showErrorAlert = false
     @State private var currentSelection: URL?
+    @State private var showRecoveryAlert = false
+    @State private var selectedScan: ScanMetadata?
 
     var body: some View {
         NavigationView {
             List {
-                ForEach(plyFiles, id: \.self) { url in
-                    HStack {
-                        Button(action: { currentSelection = url }) {
-                            VStack(alignment: .leading) {
-                                Text(url.lastPathComponent)
-                                    .font(.headline)
-                                Text(formattedDate(for: url))
-                                    .font(.caption)
-                                    .foregroundColor(.gray)
+                // In-progress scan recovery section
+                if !inProgressScans.isEmpty {
+                    Section(header: Text("Recovery").font(.headline)) {
+                        ForEach(inProgressScans, id: \.scanId) { scanMetadata in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text("Interrupted Scan")
+                                        .font(.headline)
+                                    Text(formatScanDate(scanMetadata.creationDate))
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                    Text("\(scanMetadata.frameCount) frames, \(scanMetadata.meshAnchorCount) anchors")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                                Spacer()
+                                Button(action: {
+                                    selectedScan = scanMetadata
+                                    showRecoveryAlert = true
+                                }) {
+                                    Text("Recover")
+                                        .foregroundColor(.blue)
+                                }
                             }
-                        }
-                        Spacer()
-                        Button(action: { shareFile(url) }) {
-                            Image(systemName: "square.and.arrow.up")
                         }
                     }
                 }
-                .onDelete(perform: deleteFiles)
+                
+                // Regular point clouds
+                Section(header: Text("Point Clouds").font(.headline)) {
+                    ForEach(plyFiles, id: \.self) { url in
+                        HStack {
+                            Button(action: { currentSelection = url }) {
+                                VStack(alignment: .leading) {
+                                    Text(url.lastPathComponent)
+                                        .font(.headline)
+                                    Text(formattedDate(for: url))
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                    
+                                    // Display dense point cloud badge if applicable
+                                    if url.lastPathComponent.contains("Dense") {
+                                        Text("Dense")
+                                            .font(.caption)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.green.opacity(0.2))
+                                            .cornerRadius(4)
+                                    }
+                                }
+                            }
+                            Spacer()
+                            Button(action: { shareFile(url) }) {
+                                Image(systemName: "square.and.arrow.up")
+                            }
+                        }
+                    }
+                    .onDelete(perform: deleteFiles)
+                }
             }
             .padding(.vertical, 4)
             .navigationTitle("Saved PointClouds")
@@ -134,6 +179,7 @@ struct FileBrowserView: View {
                 }
             }
             .onAppear(perform: loadPLYFiles)
+            .onAppear(perform: checkForInProgressScans)
             .onAppear {
                 arViewModel.arView?.session.pause()
             }
@@ -151,6 +197,20 @@ struct FileBrowserView: View {
                     title: Text("Error"),
                     message: Text(loadErrorMessage ?? "Unknown error"),
                     dismissButton: .default(Text("OK"))
+                )
+            }
+            .alert(isPresented: $showRecoveryAlert) {
+                Alert(
+                    title: Text("Recover Scan"),
+                    message: Text("Would you like to recover this interrupted scan? This will continue from where you left off."),
+                    primaryButton: .default(Text("Recover")) {
+                        recoverScan()
+                    },
+                    secondaryButton: .cancel(Text("Discard")) {
+                        // Optional: Delete the scan data
+                        // deleteScan(selectedScan?.scanId)
+                        selectedScan = nil
+                    }
                 )
             }
         }
@@ -174,6 +234,52 @@ struct FileBrowserView: View {
             loadErrorMessage = error.localizedDescription
             showErrorAlert = true
         }
+    }
+    
+    /// Check for any in-progress scans that could be recovered
+    private func checkForInProgressScans() {
+        let storage = ScanStorage()
+        inProgressScans = storage.findRecoverableScans()
+    }
+    
+    /// Recover a previously interrupted scan
+    private func recoverScan() {
+        guard let scan = selectedScan else {
+            return
+        }
+        
+        presentationMode.wrappedValue.dismiss()
+        
+        // Create a small delay to ensure view is dismissed first
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // Create a new storage instance
+            let storage = ScanStorage()
+            let success = storage.recoverScan(withId: scan.scanId)
+            
+            if success {
+                // Give the storage instance to the ARViewModel's coordinator
+                if let coordinator = arViewModel.coordinator {
+                    // Update the scan storage in the coordinator
+                    coordinator.recoverScan(storage: storage, scanId: scan.scanId)
+                    
+                    // Reset tracking but keep scan data
+                    if let arView = arViewModel.arView, let config = arView.session.configuration {
+                        arView.session.run(config, options: [.resetTracking])
+                    }
+                    
+                    // Update UI state
+                    arViewModel.scanStatus = .scanning
+                }
+            }
+        }
+    }
+    
+    /// Format a date for display in the recovery UI
+    private func formatScanDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 
     private func formattedDate(for url: URL) -> String {

@@ -322,6 +322,7 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
     var meshAnchors = [ARMeshAnchor]()
     var planeAnchors = [ARPlaneAnchor]()
     var capturedFrames = [CapturedFrame]()
+    var enhancedFrames = [EnhancedCapturedFrame]()
     
     private var collectingFrames = false
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -330,9 +331,19 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
     private let desiredFrameCaptureInterval: TimeInterval = 0.1 // ~10 FPS
 
     private weak var arViewModel: ARViewModel?
+    
+    // New storage and capture components
+    private var scanStorage: ScanStorage? = nil
+    private var frameCapture: EnhancedFrameCapture? = nil
+    private var currentScanId: String? = nil
+    private var pointCloudGenerator: DensePointCloudGenerator? = nil
+    private var isRecoveredScan: Bool = false
 
     init(arViewModel: ARViewModel) {
         self.arViewModel = arViewModel
+        
+        // Initialize enhanced frame capture
+        self.frameCapture = EnhancedFrameCapture(captureHighRes: true, captureDepth: true)
     }
 
     func clearAnchors() {
@@ -343,56 +354,146 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
     
     func clearFrames() {
         capturedFrames.removeAll()
+        enhancedFrames.removeAll()
         print("Cleared all captured frames.")
+        
+        // Close current storage if active
+        scanStorage?.closeCurrentScan()
+        scanStorage = nil
+        currentScanId = nil
+        isRecoveredScan = false
+    }
+    
+    /// Recover a scan from storage
+    func recoverScan(storage: ScanStorage, scanId: String) {
+        // Store the references
+        self.scanStorage = storage
+        self.currentScanId = scanId
+        self.isRecoveredScan = true
+        
+        // Set the storage for frame capture
+        frameCapture?.setStorage(storage)
+        
+        // Initialize the point cloud generator
+        pointCloudGenerator = DensePointCloudGenerator()
+        
+        // Start collecting new frames again
+        collectingFrames = true
+        lastFrameCaptureTime = 0
+        
+        print("✅ Recovered scan: \(scanId)")
     }
     
     func startCollectingFrames() {
         collectingFrames = true
         lastFrameCaptureTime = 0
-        print("Started collecting frames.")
+        
+        // Create new storage for this scan
+        let storage = ScanStorage()
+        let scanId = storage.startNewScan()
+        scanStorage = storage
+        currentScanId = scanId
+        
+        // Set storage for frame capture
+        frameCapture?.setStorage(storage)
+        
+        // Initialize point cloud generator
+        pointCloudGenerator = DensePointCloudGenerator()
+        
+        print("Started collecting frames with continuous storage. Scan ID: \(scanId)")
     }
     
     func stopCollectingFrames() {
         collectingFrames = false
-        print("Stopped collecting frames. Total frames: \(capturedFrames.count)")
+        print("Stopped collecting frames. Total frames: \(capturedFrames.count), Enhanced frames: \(enhancedFrames.count)")
     }
     
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         if collectingFrames {
             if frame.timestamp - lastFrameCaptureTime >= desiredFrameCaptureInterval {
-                captureCurrentFrame(from: frame)
-                lastFrameCaptureTime = frame.timestamp
+                // Create a local copy of the frame to avoid retaining ARFrame
+                autoreleasepool {
+                    // Use both methods for compatibility
+                    captureCurrentFrame(from: frame)
+                    
+                    // Also use enhanced frame capture
+                    if let enhancedFrame = frameCapture?.captureEnhancedFrame(from: frame) {
+                        enhancedFrames.append(enhancedFrame)
+                        
+                        // Limit the number of stored enhanced frames
+                        while enhancedFrames.count > 30 {
+                            enhancedFrames.removeFirst()
+                        }
+                    }
+                    
+                    lastFrameCaptureTime = frame.timestamp
+                }
             }
         }
+        
+        // Help prevent retention of ARFrames
+        // Note: We can't directly clear capturedImage as it's read-only
+        // Instead, we rely on autorelease pool and limited frame storage
     }
     
     private func captureCurrentFrame(from arFrame: ARFrame) {
         guard collectingFrames else { return }
         
-        let pixelBuffer = arFrame.capturedImage
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
-            print("❌ Failed to convert camera image to RGB CGImage for \(arFrame.timestamp)")
-            return
+        // Immediately store to disk if we have storage available instead of keeping in memory
+        if let storage = scanStorage {
+            // Let the storage handle saving the frame
+            let pixelBuffer = arFrame.capturedImage
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            
+            guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
+                print("❌ Failed to convert camera image to RGB CGImage for \(arFrame.timestamp)")
+                return
+            }
+            
+            let newCapturedFrame = CapturedFrame(
+                image: cgImage,
+                camera: arFrame.camera,
+                timestamp: arFrame.timestamp
+            )
+            
+            // Save directly to storage
+            storage.saveFrame(newCapturedFrame)
+            
+            // Only keep a few frames in memory for UI purposes
+            if capturedFrames.count >= 10 {
+                capturedFrames.removeFirst()
+            }
+            capturedFrames.append(newCapturedFrame)
+        } else {
+            // Fallback to memory-only storage with a strict limit
+            let pixelBuffer = arFrame.capturedImage
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            
+            guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
+                print("❌ Failed to convert camera image to RGB CGImage for \(arFrame.timestamp)")
+                return
+            }
+            
+            let newCapturedFrame = CapturedFrame(
+                image: cgImage,
+                camera: arFrame.camera,
+                timestamp: arFrame.timestamp
+            )
+            
+            if capturedFrames.count >= 30 {
+                capturedFrames.removeFirst()
+            }
+            capturedFrames.append(newCapturedFrame)
         }
-        
-        let newCapturedFrame = CapturedFrame(
-            image: cgImage,
-            camera: arFrame.camera,
-            timestamp: arFrame.timestamp
-        )
-        
-        if capturedFrames.count >= 200 {
-            capturedFrames.removeFirst()
-        }
-        capturedFrames.append(newCapturedFrame)
     }
     
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         for anchor in anchors {
             if let meshAnchor = anchor as? ARMeshAnchor {
                 meshAnchors.append(meshAnchor)
+                
+                // Also save to continuous storage
+                scanStorage?.saveMeshAnchor(meshAnchor)
             } else if let planeAnchor = anchor as? ARPlaneAnchor {
                 planeAnchors.append(planeAnchor)
             }
@@ -558,11 +659,75 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
             return
         }
         
-        guard !capturedFrames.isEmpty else {
+        // First check if we have enhanced frames available
+        let framesAvailable = !enhancedFrames.isEmpty || !capturedFrames.isEmpty
+        guard framesAvailable else {
             print("❌ No frames collected. Cannot color point cloud.")
             arViewModel?.progressMessage = "Error: No camera frames for texturing."
             return
         }
+        
+        // Use the dense point cloud generator if available
+        if let generator = pointCloudGenerator, let storage = scanStorage {
+            Task {
+                // Set up progress callback
+                generator.setProgressCallback { [weak self] message, progress in
+                    guard let self = self else { return }
+                    DispatchQueue.main.async {
+                        self.arViewModel?.progressMessage = message
+                    }
+                }
+                
+                // Create output file name
+                let timestamp = Int(Date().timeIntervalSince1970)
+                let fileName = "DensePointCloud_\(timestamp).ply"
+                let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let fileURL = documentsDirectory.appendingPathComponent(fileName)
+                
+                // Get frames from the appropriate source (enhanced or regular)
+                let frames = !capturedFrames.isEmpty ? capturedFrames : enhancedFrames.map { enhancedFrame in
+                    return CapturedFrame(
+                        image: enhancedFrame.highResImage ?? enhancedFrame.originalImage,
+                        camera: enhancedFrame.camera,
+                        timestamp: enhancedFrame.timestamp
+                    )
+                }
+                
+                // Generate the dense point cloud
+                let success = await generator.generatePointCloud(
+                    meshAnchors: meshAnchors,
+                    frames: frames,
+                    outputURL: fileURL
+                )
+                
+                if success {
+                    await MainActor.run {
+                        print("✅ Saved dense point cloud to \(fileURL.lastPathComponent)")
+                        arViewModel?.progressMessage = "Exported dense point cloud to \(fileName)"
+                        
+                        // Close scan data to finalize
+                        storage.closeCurrentScan()
+                    }
+                } else {
+                    await MainActor.run {
+                        print("❌ Failed to generate dense point cloud")
+                        arViewModel?.progressMessage = "Error: Failed to generate point cloud"
+                        
+                        // Fall back to legacy method
+                        self.legacyExportColoredPointCloud()
+                    }
+                }
+            }
+        } else {
+            // Fall back to the original method if new components aren't available
+            legacyExportColoredPointCloud()
+        }
+    }
+    
+    /// Legacy point cloud export method (for backward compatibility)
+    private func legacyExportColoredPointCloud() {
+        arViewModel?.progressMessage = "Using legacy export... Mesh Anchors: \(meshAnchors.count), Frames: \(capturedFrames.count)"
+        print("Starting legacy export with \(meshAnchors.count) mesh anchors and \(capturedFrames.count) frames.")
 
         var verticesWithColor = [(position: SIMD3<Float>, color: SIMD3<UInt8>)]()
         var defaultColorCount = 0
@@ -588,8 +753,6 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
             // Extract faces
             let faces = geometry.faces // This is ARGeometryElement
             let facesBuffer = faces.buffer.contents() // MTLBuffer contents for faces
-            // CORRECTED: ARGeometryElement (faces) does not have an 'offset' property.
-            // The 'faces.buffer' is the specific buffer for face indices, starting at its own 0.
             let indicesPerFace = faces.indexCountPerPrimitive
             var parsedFaces = [[Int]]()
             if faces.bytesPerIndex == 4 {
@@ -667,7 +830,7 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
                 verticesWithColor.append((position: worldVertex, color: sampledColor))
             }
         }
-        arViewModel?.progressMessage = "Finalizing export..."
+        arViewModel?.progressMessage = "Finalizing legacy export..."
         print("Processed \(totalVerticesProcessed) raw vertices across all anchors.")
         print("Vertices with default color: \(defaultColorCount) out of \(verticesWithColor.count)")
         

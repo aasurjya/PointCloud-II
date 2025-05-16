@@ -14,6 +14,9 @@
 		7404DCC02DD31E900064031C /* FileBroswerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7404DCBF2DD31E900064031C /* FileBroswerView.swift */; };
 		7404DCC22DD31F750064031C /* PointCloudView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7404DCC12DD31F750064031C /* PointCloudView.swift */; };
 		744CFDFE2DD3E5F200D08580 /* contentview1.swift in Sources */ = {isa = PBXBuildFile; fileRef = 744CFDFD2DD3E5F200D08580 /* contentview1.swift */; };
+		74BE6A062DD7207F00B8C793 /* DensePointCloudGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74BE6A052DD7207F00B8C793 /* DensePointCloudGenerator.swift */; };
+		74BE6A082DD720C600B8C793 /* EnhancedFrameCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74BE6A072DD720C600B8C793 /* EnhancedFrameCapture.swift */; };
+		74BE6A0A2DD7211500B8C793 /* ScanStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74BE6A092DD7211500B8C793 /* ScanStorage.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +28,9 @@
 		7404DCBF2DD31E900064031C /* FileBroswerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBroswerView.swift; sourceTree = "<group>"; };
 		7404DCC12DD31F750064031C /* PointCloudView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudView.swift; sourceTree = "<group>"; };
 		744CFDFD2DD3E5F200D08580 /* contentview1.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = contentview1.swift; sourceTree = "<group>"; };
+		74BE6A052DD7207F00B8C793 /* DensePointCloudGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DensePointCloudGenerator.swift; sourceTree = "<group>"; };
+		74BE6A072DD720C600B8C793 /* EnhancedFrameCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnhancedFrameCapture.swift; sourceTree = "<group>"; };
+		74BE6A092DD7211500B8C793 /* ScanStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanStorage.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -64,6 +70,9 @@
 				7404DCBF2DD31E900064031C /* FileBroswerView.swift */,
 				7404DCC12DD31F750064031C /* PointCloudView.swift */,
 				744CFDFD2DD3E5F200D08580 /* contentview1.swift */,
+				74BE6A052DD7207F00B8C793 /* DensePointCloudGenerator.swift */,
+				74BE6A072DD720C600B8C793 /* EnhancedFrameCapture.swift */,
+				74BE6A092DD7211500B8C793 /* ScanStorage.swift */,
 			);
 			path = PointCloudV3;
 			sourceTree = "<group>";
@@ -146,10 +155,13 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				74BE6A062DD7207F00B8C793 /* DensePointCloudGenerator.swift in Sources */,
+				74BE6A082DD720C600B8C793 /* EnhancedFrameCapture.swift in Sources */,
 				7404DCB62DCCF8210064031C /* ContentView.swift in Sources */,
 				7404DCB42DCCF8210064031C /* AppDelegate.swift in Sources */,
 				7404DCC02DD31E900064031C /* FileBroswerView.swift in Sources */,
 				744CFDFE2DD3E5F200D08580 /* contentview1.swift in Sources */,
+				74BE6A0A2DD7211500B8C793 /* ScanStorage.swift in Sources */,
 				7404DCC22DD31F750064031C /* PointCloudView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
