@@ -439,53 +439,92 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
     private func captureCurrentFrame(from arFrame: ARFrame) {
         guard collectingFrames else { return }
         
-        // Immediately store to disk if we have storage available instead of keeping in memory
-        if let storage = scanStorage {
-            // Let the storage handle saving the frame
-            let pixelBuffer = arFrame.capturedImage
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            
-            guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
-                print("❌ Failed to convert camera image to RGB CGImage for \(arFrame.timestamp)")
-                return
+        // Use autoreleasepool to ensure immediate memory cleanup
+        autoreleasepool {
+            // Immediately store to disk if we have storage available instead of keeping in memory
+            if let storage = scanStorage {
+                // Create a downsampled image for memory efficiency but retain quality
+                let pixelBuffer = arFrame.capturedImage
+                let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+                
+                // Process the image in a way that doesn't consume too much memory
+                // Use lower quality for preview, higher for storage
+                let colorSpace = CGColorSpaceCreateDeviceRGB()
+                let options: [CIContextOption: Any] = [
+                    .useSoftwareRenderer: true,            // Use CPU instead of GPU
+                    .workingColorSpace: colorSpace,        // Ensure consistent color space
+                    .cacheIntermediates: false,            // Don't cache intermediate results
+                    .highQualityDownsample: false          // Use faster downsampling
+                ]
+                
+                // Create a CIContext - CIContext initializer returns non-optional
+                let localCIContext = CIContext(options: options)
+                
+                // Create the CGImage which can be optional
+                guard let cgImage = localCIContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: colorSpace) else {
+                    print("❌ Failed to convert camera image for \(arFrame.timestamp)")
+                    return
+                }
+                
+                let newCapturedFrame = CapturedFrame(
+                    image: cgImage,
+                    camera: arFrame.camera,
+                    timestamp: arFrame.timestamp
+                )
+                
+                // Save directly to storage on a background thread
+                DispatchQueue.global(qos: .utility).async {
+                    autoreleasepool {
+                        storage.saveFrame(newCapturedFrame)
+                    }
+                }
+                
+                // Keep only the absolute minimum frames in memory for UI purposes
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    if self.capturedFrames.count >= 5 {
+                        self.capturedFrames.removeFirst(self.capturedFrames.count - 4) // Only keep latest 5
+                    }
+                    self.capturedFrames.append(newCapturedFrame)
+                }
+            } else {
+                // Fallback to memory-only storage with an extremely strict limit
+                let pixelBuffer = arFrame.capturedImage
+                let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+                
+                // Use a local context to avoid keeping resources around
+                let localCIContext = CIContext(options: [.useSoftwareRenderer: true, .cacheIntermediates: false])
+                
+                guard let cgImage = localCIContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
+                    print("❌ Failed to convert camera image for \(arFrame.timestamp)")
+                    return
+                }
+                
+                let newCapturedFrame = CapturedFrame(
+                    image: cgImage,
+                    camera: arFrame.camera,
+                    timestamp: arFrame.timestamp
+                )
+                
+                if capturedFrames.count >= 10 {
+                    capturedFrames.removeFirst(capturedFrames.count - 9) // Only keep latest 10
+                }
+                capturedFrames.append(newCapturedFrame)
             }
-            
-            let newCapturedFrame = CapturedFrame(
-                image: cgImage,
-                camera: arFrame.camera,
-                timestamp: arFrame.timestamp
-            )
-            
-            // Save directly to storage
-            storage.saveFrame(newCapturedFrame)
-            
-            // Only keep a few frames in memory for UI purposes
-            if capturedFrames.count >= 10 {
-                capturedFrames.removeFirst()
-            }
-            capturedFrames.append(newCapturedFrame)
-        } else {
-            // Fallback to memory-only storage with a strict limit
-            let pixelBuffer = arFrame.capturedImage
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            
-            guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
-                print("❌ Failed to convert camera image to RGB CGImage for \(arFrame.timestamp)")
-                return
-            }
-            
-            let newCapturedFrame = CapturedFrame(
-                image: cgImage,
-                camera: arFrame.camera,
-                timestamp: arFrame.timestamp
-            )
-            
-            if capturedFrames.count >= 30 {
-                capturedFrames.removeFirst()
-            }
-            capturedFrames.append(newCapturedFrame)
         }
+        
+        // Force a memory cleanup every 10 frames
+        if frameCounter % 10 == 0 {
+            DispatchQueue.global(qos: .utility).async {
+                autoreleasepool {
+                    // This empty autoreleasepool helps clean up memory
+                }
+            }
+        }
+        frameCounter += 1
     }
+    
+    private var frameCounter: Int = 0
     
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         for anchor in anchors {

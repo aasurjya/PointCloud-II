@@ -463,38 +463,56 @@ class DensePointCloudGenerator {
         let imageWidthCG = CGFloat(frame.image.width)
         let imageHeightCG = CGFloat(frame.image.height)
         
-        let projectedPt = camera.projectPoint(
-            worldPoint,
-            orientation: .landscapeRight,
-            viewportSize: CGSize(width: imageWidthCG, height: imageHeightCG)
-        )
+        // First, project the 3D point to 2D image coordinates
+        // Use the view matrix to transform the point into camera space
+        let viewMatrix = camera.transform.inverse
+        let viewPoint = viewMatrix * SIMD4<Float>(worldPoint.x, worldPoint.y, worldPoint.z, 1.0)
         
-        // Check if point is behind the camera
-        let pointInCameraSpace = camera.transform.inverse * SIMD4<Float>(worldPoint.x, worldPoint.y, worldPoint.z, 1.0)
-        if pointInCameraSpace.z >= 0 {
-            return SIMD3<UInt8>(128, 128, 128)
+        // Check if point is behind camera (positive z in camera space means behind)
+        if viewPoint.z >= 0 {
+            return SIMD3<UInt8>(128, 128, 128) // Gray for points behind camera
         }
         
-        // Convert to Float for consistent calculations
-        let u_exact = Float(projectedPt.x)
-        let v_exact = Float(projectedPt.y)
+        // Manual projection using camera intrinsics
+        let fx = camera.intrinsics[0][0]
+        let fy = camera.intrinsics[1][1]
+        let cx = camera.intrinsics[2][0]
+        let cy = camera.intrinsics[2][1]
         
-        // Check bounds
-        if u_exact < 0 || u_exact >= Float(imageWidthCG) - 1 || v_exact < 0 || v_exact >= Float(imageHeightCG) - 1 {
-            return SIMD3<UInt8>(128, 128, 128)
+        // Project to normalized image coordinates
+        let x = -viewPoint.x / viewPoint.z * fx + cx
+        let y = -viewPoint.y / viewPoint.z * fy + cy
+        
+        // Convert to pixel coordinates
+        let u_exact = Float(x)
+        let v_exact = Float(y)
+        
+        // Check bounds with a small margin
+        let margin: Float = 1.0
+        if u_exact < margin || u_exact >= Float(imageWidthCG) - margin || 
+           v_exact < margin || v_exact >= Float(imageHeightCG) - margin {
+            return SIMD3<UInt8>(128, 128, 128) // Gray for out-of-bounds
         }
         
-        // Get image data
+        // Get image data directly
         guard let dataProvider = frame.image.dataProvider,
               let data = dataProvider.data,
               let ptr = CFDataGetBytePtr(data) else {
-            return SIMD3<UInt8>(128, 128, 128)
+            print("Failed to get image data pointer")
+            return SIMD3<UInt8>(255, 0, 0) // Red for errors to make them visible
         }
         
+        // Get image format information
         let bytesPerRow = frame.image.bytesPerRow
         let bytesPerPixel = frame.image.bitsPerPixel / 8
-        if bytesPerPixel != 4 {
-            return SIMD3<UInt8>(100, 100, 100)
+        
+        // Debug info
+        print("Image format: \(frame.image.width)x\(frame.image.height), BPP: \(bytesPerPixel), Alpha: \(frame.image.alphaInfo.rawValue)")
+        
+        // Ensure we have compatible pixel format
+        if bytesPerPixel < 3 {
+            print("Incompatible image format - \(bytesPerPixel) bytes per pixel")
+            return SIMD3<UInt8>(0, 255, 0) // Green for format errors
         }
         
         // Bilinear interpolation
@@ -506,12 +524,33 @@ class DensePointCloudGenerator {
         let u_opposite = 1 - u_ratio
         let v_opposite = 1 - v_ratio
         
+        // A safer way to get color components with bounds checking and offset correction
         func getColorComponentAt(x: Int, y: Int, componentOffset: Int) -> Float {
-            let offset = y * bytesPerRow + x * bytesPerPixel + componentOffset
-            guard offset < CFDataGetLength(data) && offset >= 0 else {
-                return 128.0
+            // Calculate the byte offset for the pixel
+            let pixelOffset = y * bytesPerRow + x * bytesPerPixel
+            
+            // Safety bounds check
+            guard pixelOffset >= 0 && pixelOffset + componentOffset < CFDataGetLength(data) else {
+                return 128.0 // Default gray value for out of bounds
             }
-            return Float(ptr[offset])
+            
+            // Apply BGR vs RGB adjustment if needed
+            let actualOffset: Int
+            if frame.image.bitmapInfo.contains(.byteOrder32Little) {
+                // BGR format (typical for iOS)
+                let bgr = [2, 1, 0, 3] // Map R->B, G->G, B->R
+                actualOffset = pixelOffset + bgr[componentOffset]
+            } else {
+                // RGB format
+                actualOffset = pixelOffset + componentOffset
+            }
+            
+            // Final bounds check
+            guard actualOffset >= 0 && actualOffset < CFDataGetLength(data) else {
+                return 128.0 // Default gray value
+            }
+            
+            return Float(ptr[actualOffset])
         }
         
         // Sample corners
@@ -544,11 +583,18 @@ class DensePointCloudGenerator {
         let b_bottom = b01 * u_opposite + b11 * u_ratio
         let final_b = b_top * v_opposite + b_bottom * v_ratio
         
-        return SIMD3<UInt8>(
-            UInt8(clamping: Int(round(final_r))),
-            UInt8(clamping: Int(round(final_g))),
-            UInt8(clamping: Int(round(final_b)))
-        )
+        // Ensure values are in valid range
+        let r = UInt8(min(255, max(0, final_r)))
+        let g = UInt8(min(255, max(0, final_g)))
+        let b = UInt8(min(255, max(0, final_b)))
+        
+        // Sanity check - if all white, log a warning (for debugging)
+        if r > 240 && g > 240 && b > 240 && (arc4random_uniform(100) < 10) {
+            // Only log occasionally
+            print("WARNING: Sampled color is very bright (\(r),\(g),\(b)) for point \(worldPoint), uv: (\(u_exact),\(v_exact))")
+        }
+        
+        return SIMD3<UInt8>(r, g, b)
     }
     
     /// Filter outlier points
@@ -587,9 +633,11 @@ class DensePointCloudGenerator {
     /// Initialize a PLY file with header
     private func initializePLYFile(url: URL, estimatedVertexCount: Int) -> Bool {
         // Create initial PLY header with estimated vertex count
+        // NOTE: Using standard PLY format that all tools understand
         let plyHeader = """
         ply
         format ascii 1.0
+        comment Generated by PointCloudV3
         element vertex \(estimatedVertexCount)
         property float x
         property float y
@@ -597,6 +645,7 @@ class DensePointCloudGenerator {
         property uchar red
         property uchar green
         property uchar blue
+        comment confidence values stored as scalars
         property float confidence
         end_header
         """
@@ -674,9 +723,12 @@ class DensePointCloudGenerator {
                 // Sample color and get confidence
                 let (color, confidence) = enhancedSampleColor(point: worldVertex, normal: worldNormal, frames: sortedFrames)
                 
+                // Apply color enhancement before writing
+                let enhancedColor = enhanceColorContrast(color, confidence: confidence)
+                
                 // Write vertex to string buffer
                 batchOutput += "\n\(worldVertex.x) \(worldVertex.y) \(worldVertex.z) "
-                batchOutput += "\(color.x) \(color.y) \(color.z) \(confidence)"
+                batchOutput += "\(enhancedColor.x) \(enhancedColor.y) \(enhancedColor.z) \(confidence)"
                 
                 verticesWritten += 1
                 totalVerticesProcessed += 1
@@ -801,6 +853,137 @@ class DensePointCloudGenerator {
             print("❌ Error writing PLY file: \(error.localizedDescription)")
             return false
         }
+    }
+    
+    /// Enhance color contrast for better visual quality with special handling for light colors
+    private func enhanceColorContrast(_ color: SIMD3<UInt8>, confidence: Float) -> SIMD3<UInt8> {
+        // Convert to floating point for processing
+        let rFloat = Float(color.x) / 255.0
+        let gFloat = Float(color.y) / 255.0
+        let bFloat = Float(color.z) / 255.0
+        
+        // Detect if this is a very light color (close to white)
+        let isVeryLight = (rFloat > 0.9 && gFloat > 0.9 && bFloat > 0.9)
+        let isNearWhite = (rFloat > 0.8 && gFloat > 0.8 && bFloat > 0.8)
+        
+        // For very light colors, increase color variation
+        if isVeryLight || isNearWhite {
+            // Identify slight color biases in "white" objects
+            let average = (rFloat + gFloat + bFloat) / 3.0
+            
+            // Emphasize any color tint from the average
+            let tintStrength: Float = isVeryLight ? 6.0 : 3.0 // Stronger for whiter objects
+            
+            // Calculate the tint differences (how much each channel deviates from average)
+            let rDiff = (rFloat - average) * tintStrength 
+            let gDiff = (gFloat - average) * tintStrength
+            let bDiff = (bFloat - average) * tintStrength
+            
+            // Apply a subtle tint to make white objects distinguishable
+            // This preserves relative differences but makes them more obvious
+            var enhancedR = rFloat + rDiff
+            var enhancedG = gFloat + gDiff
+            var enhancedB = bFloat + bDiff
+            
+            // Ensure values stay in the valid 0-1 range
+            enhancedR = min(1.0, max(0.2, enhancedR))
+            enhancedG = min(1.0, max(0.2, enhancedG))
+            enhancedB = min(1.0, max(0.2, enhancedB))
+            
+            // Apply a very subtle saturation boost to near-white objects
+            let (h, s, v) = rgbToHsv(r: enhancedR, g: enhancedG, b: enhancedB)
+            
+            // Different saturation treatment for near-white vs. pure white
+            let saturationEnhanced = min(Float(1.0), s * (isVeryLight ? 8.0 : 4.0))
+            let (finalR, finalG, finalB) = hsvToRgb(h: h, s: saturationEnhanced, v: v)
+            
+            // Convert back to UInt8
+            return SIMD3<UInt8>(
+                UInt8(min(255, max(0, finalR * 255.0))),
+                UInt8(min(255, max(0, finalG * 255.0))),
+                UInt8(min(255, max(0, finalB * 255.0)))
+            )
+        } else {
+            // For normal colored objects, apply standard contrast enhancement
+            // This boosts mid-tones while preserving highlights and shadows
+            let contrast: Float = 1.5 // Higher = more contrast
+            let enhancedR = enhanceChannel(rFloat, contrast: contrast)
+            let enhancedG = enhanceChannel(gFloat, contrast: contrast)
+            let enhancedB = enhanceChannel(bFloat, contrast: contrast)
+            
+            // Apply saturation boost for more vibrant colors
+            let saturationBoost: Float = 1.3 // Higher = more saturated
+            let (h, s, v) = rgbToHsv(r: enhancedR, g: enhancedG, b: enhancedB)
+            let saturationEnhanced = min(Float(1.0), s * saturationBoost)
+            let (finalR, finalG, finalB) = hsvToRgb(h: h, s: saturationEnhanced, v: v)
+            
+            // Convert back to UInt8
+            return SIMD3<UInt8>(
+                UInt8(min(255, max(0, finalR * 255.0))),
+                UInt8(min(255, max(0, finalG * 255.0))),
+                UInt8(min(255, max(0, finalB * 255.0)))
+            )
+        }
+    }
+    
+    /// Apply sigmoid contrast function to a color channel
+    private func enhanceChannel(_ value: Float, contrast: Float) -> Float {
+        // Sigmoid function for smooth contrast enhancement
+        return Float(1.0) / (Float(1.0) + exp(-contrast * (value - Float(0.5))))
+    }
+    
+    /// Convert RGB to HSV color space
+    private func rgbToHsv(r: Float, g: Float, b: Float) -> (h: Float, s: Float, v: Float) {
+        let cmax = max(max(r, g), b)
+        let cmin = min(min(r, g), b)
+        let delta = cmax - cmin
+        
+        // Calculate hue
+        var h: Float = 0.0
+        if delta != 0 {
+            if cmax == r {
+                h = 60 * ((g - b) / delta).truncatingRemainder(dividingBy: 6)
+            } else if cmax == g {
+                h = 60 * ((b - r) / delta + 2)
+            } else {
+                h = 60 * ((r - g) / delta + 4)
+            }
+        }
+        if h < 0 { h += 360 }
+        
+        // Calculate saturation and value
+        let s = cmax == 0 ? 0 : delta / cmax
+        let v = cmax
+        
+        return (h / Float(360.0), s, v)
+    }
+    
+    /// Convert HSV back to RGB color space
+    private func hsvToRgb(h: Float, s: Float, v: Float) -> (r: Float, g: Float, b: Float) {
+        let h = h * Float(360.0) // Scale hue back to 0-360
+        let c = v * s
+        let x = c * (Float(1.0) - abs((h / Float(60.0)).truncatingRemainder(dividingBy: Float(2.0)) - Float(1.0)))
+        let m = v - c
+        
+        var r: Float = 0.0
+        var g: Float = 0.0
+        var b: Float = 0.0
+        
+        if h < 60 {
+            r = c; g = x; b = 0
+        } else if h < 120 {
+            r = x; g = c; b = 0
+        } else if h < 180 {
+            r = 0; g = c; b = x
+        } else if h < 240 {
+            r = 0; g = x; b = c
+        } else if h < 300 {
+            r = x; g = 0; b = c
+        } else {
+            r = c; g = 0; b = x
+        }
+        
+        return (r + m, g + m, b + m)
     }
     
     private func updateProgress(_ message: String, _ progress: Double) {
