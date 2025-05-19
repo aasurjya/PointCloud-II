@@ -11,9 +11,12 @@
 		7404DCB62DCCF8210064031C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7404DCB52DCCF8210064031C /* ContentView.swift */; };
 		7404DCB82DCCF8220064031C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7404DCB72DCCF8220064031C /* Assets.xcassets */; };
 		7404DCBB2DCCF8220064031C /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7404DCBA2DCCF8220064031C /* Preview Assets.xcassets */; };
-		7404DCC02DD31E900064031C /* FileBroswerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7404DCBF2DD31E900064031C /* FileBroswerView.swift */; };
-		7404DCC22DD31F750064031C /* PointCloudView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7404DCC12DD31F750064031C /* PointCloudView.swift */; };
+		7435211D2DDAFEF800D8AED7 /* OBJSceneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7435211C2DDAFEF800D8AED7 /* OBJSceneView.swift */; };
+		7443E9462DD9E77200620661 /* MeshGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7443E9452DD9E77200620661 /* MeshGenerator.swift */; };
+		7443E9482DD9E8F500620661 /* PLYColorProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7443E9472DD9E8F500620661 /* PLYColorProcessor.swift */; };
 		744CFDFE2DD3E5F200D08580 /* contentview1.swift in Sources */ = {isa = PBXBuildFile; fileRef = 744CFDFD2DD3E5F200D08580 /* contentview1.swift */; };
+		747DA6422DDAE78600061F7A /* PointCloudView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7404DCC12DD31F750064031C /* PointCloudView.swift */; };
+		747DA6432DDAE95300061F7A /* FileBroswerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7404DCBF2DD31E900064031C /* FileBroswerView.swift */; };
 		74BE6A062DD7207F00B8C793 /* DensePointCloudGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74BE6A052DD7207F00B8C793 /* DensePointCloudGenerator.swift */; };
 		74BE6A082DD720C600B8C793 /* EnhancedFrameCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74BE6A072DD720C600B8C793 /* EnhancedFrameCapture.swift */; };
 		74BE6A0A2DD7211500B8C793 /* ScanStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74BE6A092DD7211500B8C793 /* ScanStorage.swift */; };
@@ -27,6 +30,9 @@
 		7404DCBA2DCCF8220064031C /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		7404DCBF2DD31E900064031C /* FileBroswerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBroswerView.swift; sourceTree = "<group>"; };
 		7404DCC12DD31F750064031C /* PointCloudView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudView.swift; sourceTree = "<group>"; };
+		7435211C2DDAFEF800D8AED7 /* OBJSceneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OBJSceneView.swift; sourceTree = "<group>"; };
+		7443E9452DD9E77200620661 /* MeshGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshGenerator.swift; sourceTree = "<group>"; };
+		7443E9472DD9E8F500620661 /* PLYColorProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PLYColorProcessor.swift; sourceTree = "<group>"; };
 		744CFDFD2DD3E5F200D08580 /* contentview1.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = contentview1.swift; sourceTree = "<group>"; };
 		74BE6A052DD7207F00B8C793 /* DensePointCloudGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DensePointCloudGenerator.swift; sourceTree = "<group>"; };
 		74BE6A072DD720C600B8C793 /* EnhancedFrameCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnhancedFrameCapture.swift; sourceTree = "<group>"; };
@@ -68,11 +74,14 @@
 				7404DCB72DCCF8220064031C /* Assets.xcassets */,
 				7404DCB92DCCF8220064031C /* Preview Content */,
 				7404DCBF2DD31E900064031C /* FileBroswerView.swift */,
+				7435211C2DDAFEF800D8AED7 /* OBJSceneView.swift */,
 				7404DCC12DD31F750064031C /* PointCloudView.swift */,
 				744CFDFD2DD3E5F200D08580 /* contentview1.swift */,
 				74BE6A052DD7207F00B8C793 /* DensePointCloudGenerator.swift */,
 				74BE6A072DD720C600B8C793 /* EnhancedFrameCapture.swift */,
 				74BE6A092DD7211500B8C793 /* ScanStorage.swift */,
+				7443E9452DD9E77200620661 /* MeshGenerator.swift */,
+				7443E9472DD9E8F500620661 /* PLYColorProcessor.swift */,
 			);
 			path = PointCloudV3;
 			sourceTree = "<group>";
@@ -156,13 +165,16 @@
 			buildActionMask = 2147483647;
 			files = (
 				74BE6A062DD7207F00B8C793 /* DensePointCloudGenerator.swift in Sources */,
+				747DA6422DDAE78600061F7A /* PointCloudView.swift in Sources */,
 				74BE6A082DD720C600B8C793 /* EnhancedFrameCapture.swift in Sources */,
 				7404DCB62DCCF8210064031C /* ContentView.swift in Sources */,
 				7404DCB42DCCF8210064031C /* AppDelegate.swift in Sources */,
-				7404DCC02DD31E900064031C /* FileBroswerView.swift in Sources */,
+				747DA6432DDAE95300061F7A /* FileBroswerView.swift in Sources */,
+				7443E9482DD9E8F500620661 /* PLYColorProcessor.swift in Sources */,
+				7435211D2DDAFEF800D8AED7 /* OBJSceneView.swift in Sources */,
 				744CFDFE2DD3E5F200D08580 /* contentview1.swift in Sources */,
 				74BE6A0A2DD7211500B8C793 /* ScanStorage.swift in Sources */,
-				7404DCC22DD31F750064031C /* PointCloudView.swift in Sources */,
+				7443E9462DD9E77200620661 /* MeshGenerator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

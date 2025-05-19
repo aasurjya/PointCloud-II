@@ -1,89 +1,6 @@
-//// FileBrowserView.swift
-//// PointCloudV3
-//// Created by ihub-devs on 13/05/25.
-//
-//import SwiftUI
-//import RealityKit   // for ARViewModel
-//import ARKit        // for ARViewModel
-//
-//// Allow URL to work with .sheet(item:)
-//extension URL: Identifiable {
-//    public var id: String { absoluteString }
-//}
-//
-//struct FileBrowserView: View {
-//    @EnvironmentObject var arViewModel: ARViewModel
-//    @Environment(\.`presentationMode`) var presentationMode
-//
-//    @State private var plyFiles: [URL] = []
-//    @State private var loadErrorMessage: String?
-//    @State private var showErrorAlert = false
-//    @State private var currentSelection: URL?
-//
-//    var body: some View {
-//        NavigationView {
-//            List(plyFiles, id: \.self) { url in
-//                Button(action: { currentSelection = url }) {
-//                    Text(url.lastPathComponent)
-//                }
-//            }
-//            .navigationTitle("Saved PointClouds")
-//            .toolbar {
-//                Button("Reload", action: loadPLYFiles)
-//            }
-//            .onAppear(perform: loadPLYFiles)
-//        }
-//        // Pause AR session while browsing
-//        .onAppear {
-//            arViewModel.arView?.session.pause()
-//        }
-//        .onDisappear {
-//            if let config = arViewModel.arView?.session.configuration {
-//                arViewModel.arView?.session.run(config)
-//            }
-//        }
-//        // Present the PointCloudView sheet when a file is tapped
-//        .sheet(item: $currentSelection) { url in
-//            PointCloudView(plyURL: url)
-//                .environmentObject(arViewModel)
-//        }
-//        // Show an alert if directory scan fails
-//        .alert(isPresented: $showErrorAlert) {
-//            Alert(
-//                title: Text("Error"),
-//                message: Text(loadErrorMessage ?? "Unknown error"),
-//                dismissButton: .default(Text("OK"))
-//            )
-//        }
-//    }
-//
-//    private func loadPLYFiles() {
-//        do {
-//            let docsURL = FileManager.default
-//                .urls(for: .documentDirectory, in: .userDomainMask)
-//                .first!
-//            let all = try FileManager.default.contentsOfDirectory(
-//                at: docsURL,
-//                includingPropertiesForKeys: nil,
-//                options: [.skipsHiddenFiles]
-//            )
-//            plyFiles = all.filter { $0.pathExtension.lowercased() == "ply" }
-//        } catch {
-//            loadErrorMessage = error.localizedDescription
-//            showErrorAlert = true
-//        }
-//    }
-//}
-
-
-// FileBrowserView.swift
-// PointCloudV3
-// Created by ihub-devs on 13/05/25.
-
-
 import SwiftUI
-import RealityKit
-import ARKit
+import RealityKit // for ARViewModel
+import ARKit      // for ARViewModel
 
 // Allow URL to work with .sheet(item:)
 extension URL: Identifiable {
@@ -93,13 +10,17 @@ extension URL: Identifiable {
 struct FileBrowserView: View {
     @EnvironmentObject var arViewModel: ARViewModel
     @Environment(\.presentationMode) var presentationMode
+
     @State private var plyFiles: [URL] = []
-    @State private var inProgressScans: [ScanMetadata] = []
+    @State private var objFiles: [URL] = [] // Added for OBJ files
     @State private var loadErrorMessage: String?
     @State private var showErrorAlert = false
     @State private var currentSelection: URL?
-    @State private var showRecoveryAlert = false
+    
+    // For scan recovery
+    @State private var inProgressScans: [ScanMetadata] = []
     @State private var selectedScan: ScanMetadata?
+    @State private var showRecoveryAlert = false
 
     var body: some View {
         NavigationView {
@@ -132,40 +53,67 @@ struct FileBrowserView: View {
                     }
                 }
                 
-                // Regular point clouds
-                Section(header: Text("Point Clouds").font(.headline)) {
-                    ForEach(plyFiles, id: \.self) { url in
-                        HStack {
-                            Button(action: { currentSelection = url }) {
-                                VStack(alignment: .leading) {
-                                    Text(url.lastPathComponent)
-                                        .font(.headline)
-                                    Text(formattedDate(for: url))
-                                        .font(.caption)
-                                        .foregroundColor(.gray)
-                                    
-                                    // Display dense point cloud badge if applicable
-                                    if url.lastPathComponent.contains("Dense") {
-                                        Text("Dense")
+                // Saved Point Clouds (.ply)
+                if !plyFiles.isEmpty {
+                    Section(header: Text("Saved Point Clouds (.ply)").font(.headline)) {
+                        ForEach(plyFiles, id: \.self) { url in
+                            HStack {
+                                Button(action: { currentSelection = url }) {
+                                    VStack(alignment: .leading) {
+                                        Text(url.lastPathComponent)
+                                            .font(.headline)
+                                        Text(formattedDate(for: url))
                                             .font(.caption)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.green.opacity(0.2))
-                                            .cornerRadius(4)
+                                            .foregroundColor(.gray)
+                                        
+                                        if url.lastPathComponent.contains("Dense") {
+                                            Text("Dense")
+                                                .font(.caption)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Color.green.opacity(0.2))
+                                                .cornerRadius(4)
+                                        }
                                     }
                                 }
-                            }
-                            Spacer()
-                            Button(action: { shareFile(url) }) {
-                                Image(systemName: "square.and.arrow.up")
+                                Spacer()
+                                Button(action: { shareFile(url) }) {
+                                    Image(systemName: "square.and.arrow.up")
+                                }
                             }
                         }
+                        .onDelete(perform: deletePLYFiles)
                     }
-                    .onDelete(perform: deleteFiles)
+                }
+
+                // Saved Models (.obj)
+                if !objFiles.isEmpty {
+                    Section(header: Text("Saved Models (.obj)").font(.headline)) {
+                        ForEach(objFiles, id: \.self) { url in
+                            HStack {
+                                Button(action: { currentSelection = url }) {
+                                    VStack(alignment: .leading) {
+                                        Text(url.lastPathComponent)
+                                            .font(.headline)
+                                        Text(formattedDate(for: url)) // Assuming same date formatting
+                                            .font(.caption)
+                                            .foregroundColor(.gray)
+                                    }
+                                }
+                                Spacer()
+                                // Optionally, add a share button for OBJ files if needed
+                                // Button(action: { shareFile(url) }) {
+                                //     Image(systemName: "square.and.arrow.up")
+                                // }
+                            }
+                        }
+                        .onDelete(perform: deleteOBJFiles)
+                    }
                 }
             }
+            .listStyle(InsetGroupedListStyle()) // Or any other style you prefer
             .padding(.vertical, 4)
-            .navigationTitle("Saved PointClouds")
+            .navigationTitle("Project Files")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Close") {
@@ -174,13 +122,13 @@ struct FileBrowserView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Reload") {
-                        loadPLYFiles()
+                        loadProjectFiles()
                     }
                 }
             }
-            .onAppear(perform: loadPLYFiles)
-            .onAppear(perform: checkForInProgressScans)
             .onAppear {
+                loadProjectFiles()
+                checkForInProgressScans()
                 arViewModel.arView?.session.pause()
             }
             .onDisappear {
@@ -189,8 +137,16 @@ struct FileBrowserView: View {
                 }
             }
             .sheet(item: $currentSelection) { url in
-                PointCloudView(plyURL: url)
-                    .environmentObject(arViewModel)
+                if url.pathExtension.lowercased() == "ply" {
+                    PointCloudView(plyURL: url)
+                        .environmentObject(arViewModel)
+                } else if url.pathExtension.lowercased() == "obj" {
+                    // Placeholder for OBJSceneView - this will be created next
+                    OBJSceneView(objURL: url) 
+                         .environmentObject(arViewModel) // Pass arViewModel if OBJSceneView needs it
+                } else {
+                    Text("Unsupported file type: \(url.lastPathComponent)")
+                }
             }
             .alert(isPresented: $showErrorAlert) {
                 Alert(
@@ -207,16 +163,15 @@ struct FileBrowserView: View {
                         recoverScan()
                     },
                     secondaryButton: .cancel(Text("Discard")) {
-                        // Optional: Delete the scan data
-                        // deleteScan(selectedScan?.scanId)
                         selectedScan = nil
                     }
                 )
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle()) // Recommended for sheets
     }
 
-    private func loadPLYFiles() {
+    private func loadProjectFiles() {
         do {
             let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
             let all = try FileManager.default.contentsOfDirectory(
@@ -224,25 +179,28 @@ struct FileBrowserView: View {
                 includingPropertiesForKeys: [.creationDateKey],
                 options: [.skipsHiddenFiles]
             )
-            plyFiles = all.filter { $0.pathExtension.lowercased() == "ply" }
-                .sorted { (lhs, rhs) -> Bool in
-                    let lhsDate = (try? lhs.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? Date.distantPast
-                    let rhsDate = (try? rhs.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? Date.distantPast
-                    return lhsDate > rhsDate
-                }
+            
+            // Sort by creation date, newest first
+            let sortedFiles = all.sorted { (url1, url2) -> Bool in
+                let date1 = (try? url1.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? Date.distantPast
+                let date2 = (try? url2.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? Date.distantPast
+                return date1 > date2
+            }
+            
+            plyFiles = sortedFiles.filter { $0.pathExtension.lowercased() == "ply" }
+            objFiles = sortedFiles.filter { $0.pathExtension.lowercased() == "obj" }
+            
         } catch {
             loadErrorMessage = error.localizedDescription
             showErrorAlert = true
         }
     }
     
-    /// Check for any in-progress scans that could be recovered
     private func checkForInProgressScans() {
         let storage = ScanStorage()
         inProgressScans = storage.findRecoverableScans()
     }
     
-    /// Recover a previously interrupted scan
     private func recoverScan() {
         guard let scan = selectedScan else {
             return
@@ -250,31 +208,21 @@ struct FileBrowserView: View {
         
         presentationMode.wrappedValue.dismiss()
         
-        // Create a small delay to ensure view is dismissed first
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            // Create a new storage instance
             let storage = ScanStorage()
             let success = storage.recoverScan(withId: scan.scanId)
-            
             if success {
-                // Give the storage instance to the ARViewModel's coordinator
                 if let coordinator = arViewModel.coordinator {
-                    // Update the scan storage in the coordinator
                     coordinator.recoverScan(storage: storage, scanId: scan.scanId)
-                    
-                    // Reset tracking but keep scan data
                     if let arView = arViewModel.arView, let config = arView.session.configuration {
                         arView.session.run(config, options: [.resetTracking])
                     }
-                    
-                    // Update UI state
                     arViewModel.scanStatus = .scanning
                 }
             }
         }
     }
     
-    /// Format a date for display in the recovery UI
     private func formatScanDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
@@ -290,19 +238,31 @@ struct FileBrowserView: View {
             formatter.timeStyle = .short
             return formatter.string(from: creationDate)
         }
-        return ""
+        return "Date N/A"
     }
 
-    private func deleteFiles(at offsets: IndexSet) {
+    private func deletePLYFiles(at offsets: IndexSet) {
         let filesToDelete = offsets.map { plyFiles[$0] }
         for file in filesToDelete {
             do {
                 try FileManager.default.removeItem(at: file)
             } catch {
-                print("Failed to delete \(file.lastPathComponent): \(error)")
+                print("Failed to delete PLY file \(file.lastPathComponent): \(error)")
             }
         }
         plyFiles.remove(atOffsets: offsets)
+    }
+
+    private func deleteOBJFiles(at offsets: IndexSet) {
+        let filesToDelete = offsets.map { objFiles[$0] }
+        for file in filesToDelete {
+            do {
+                try FileManager.default.removeItem(at: file)
+            } catch {
+                print("Failed to delete OBJ file \(file.lastPathComponent): \(error)")
+            }
+        }
+        objFiles.remove(atOffsets: offsets)
     }
 
     private func shareFile(_ url: URL) {
@@ -314,3 +274,12 @@ struct FileBrowserView: View {
         rootViewController.present(activityVC, animated: true, completion: nil)
     }
 }
+
+// Preview provider (optional, but good for development)
+struct FileBrowserView_Previews: PreviewProvider {
+    static var previews: some View {
+        FileBrowserView()
+            .environmentObject(ARViewModel()) // Provide a mock ARViewModel
+    }
+}
+
