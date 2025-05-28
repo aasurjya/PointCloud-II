@@ -39,10 +39,15 @@ struct ContentView: View {
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topTrailing) {
             ARViewContainer()
                 .edgesIgnoringSafeArea(.all)
                 .environmentObject(arViewModel)
+
+            // Persistent Info Button in the top-right corner
+            InfoButtonView()
+                .padding(.top, 8)
+                .padding(.trailing, 8)
 
             VStack {
                 Spacer()

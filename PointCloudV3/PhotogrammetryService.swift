@@ -1,6 +1,8 @@
 import RealityKit
 import Combine
-import SwiftUI // For @Published and ObservableObject
+import SwiftUI
+import UIKit
+import CoreImage
 
 @available(iOS 17.0, *)
 class PhotogrammetryService: ObservableObject {
@@ -8,458 +10,523 @@ class PhotogrammetryService: ObservableObject {
     @Published var generatedModelURL: URL?
     @Published var errorMessage: String?
     @Published var isProcessing: Bool = false
-
+    @Published var processingStage: String = ""
+    
     private var session: PhotogrammetrySession?
     private var currentOutputURL: URL?
-    private var sessionTask: Task<Void, Error>? // Renamed to avoid conflict with Foundation.Task
+    private var sessionTask: Task<Void, Never>?
+    // Enhanced configuration options
+    struct ProcessingOptions {
+        let detailLevel: PhotogrammetrySession.Request.Detail
+        let featureSensitivity: PhotogrammetrySession.Configuration.FeatureSensitivity
+        let sampleOrdering: PhotogrammetrySession.Configuration.SampleOrdering
+        let enableObjectMasking: Bool
+        let maxImageCount: Int?
+        
+        static let highQuality = ProcessingOptions(
+            detailLevel: .reduced,  // Changed from .maximum
+            featureSensitivity: .high,
+            sampleOrdering: .sequential,
+            enableObjectMasking: false,
+            maxImageCount: nil
+        )
+        
+        static let balanced = ProcessingOptions(
+            detailLevel: .reduced,  // Already correct
+            featureSensitivity: .normal,
+            sampleOrdering: .unordered,
+            enableObjectMasking: false,
+            maxImageCount: 200
+        )
+        
+        static let fast = ProcessingOptions(
+            detailLevel: .reduced,  // Changed from .preview
+            featureSensitivity: .normal,
+            sampleOrdering: .unordered,
+            enableObjectMasking: false,
+            maxImageCount: 100
+        )
+    }
 
-    // Singleton for easier access if needed, or you can inject it.
-    // static let shared = PhotogrammetryService()
+
 
     init() {}
-
-    // Simplified API that always uses .reduced detail level
-    func generateUSDZ(from imageDirectoryURL: URL, outputFileName: String) {
-        // We're using .reduced as it's the only detail level we've confirmed exists
-        let detailLevel = PhotogrammetrySession.Request.Detail.reduced
+    
+    func generateUSDZ(from imageDirectoryURL: URL,
+                     outputFileName: String,
+                     options: ProcessingOptions = .balanced) {
         
-        print("📸 PhotogrammetryService: Starting USDZ generation")
-        print("📁 Image directory: \(imageDirectoryURL.path)")
+        print("📸 Starting USDZ generation with \(options.detailLevel) detail")
         
-        // Get the parent directory (Scan_XXXXX directory)
-        let scanDirectory = imageDirectoryURL.deletingLastPathComponent()
-        print("🔍 Scan directory: \(scanDirectory.path)")
+        // Enhanced image validation
+        guard let validatedImages = validateAndPrepareImages(at: imageDirectoryURL,
+                                                           maxCount: options.maxImageCount) else {
+            return
+        }
         
-        // Check directory contents
+        // Create optimized configuration
+        let configuration = createOptimizedConfiguration(for: options, imageCount: validatedImages.count)
+        
+        // Continue with session creation
+        createPhotogrammetrySession(with: configuration,
+                                   imageDirectory: imageDirectoryURL,
+                                   outputFileName: outputFileName,
+                                   options: options)
+    }
+    
+    private func validateAndPrepareImages(at directory: URL, maxCount: Int?) -> [URL]? {
         do {
             let fileManager = FileManager.default
-            
-            // First verify the directory exists and is accessible
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: imageDirectoryURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                let errorMsg = "Image directory does not exist or is not a directory: \(imageDirectoryURL.path)"
-                print("❌ \(errorMsg)")
-                DispatchQueue.main.async {
-                    self.errorMessage = errorMsg
-                    self.isProcessing = false
-                }
-                return
-            }
-            
-            // Get all image files
             let supportedExtensions = ["jpg", "jpeg", "png", "heic", "tiff"]
-            let contents = try fileManager.contentsOfDirectory(at: imageDirectoryURL, 
-                                                            includingPropertiesForKeys: [.fileSizeKey, .creationDateKey], 
-                                                            options: [.skipsHiddenFiles])
             
-            // Filter for image files and sort by name for consistent ordering
-            let imageFiles = contents.filter { url in
-                let ext = url.pathExtension.lowercased()
-                return supportedExtensions.contains(ext)
-            }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            let contents = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.fileSizeKey, .creationDateKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
             
-            print("📊 Found \(imageFiles.count) image files in directory")
+            // Filter and sort images
+            var imageFiles = contents.filter { url in
+                supportedExtensions.contains(url.pathExtension.lowercased())
+            }.sorted { url1, url2 in
+                // Sort by creation date if available, otherwise by name
+                let date1 = (try? url1.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantPast
+                let date2 = (try? url2.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantPast
+                return date1 < date2
+            }
             
-            // Check if we have enough images (minimum 3 for photogrammetry)
-            if imageFiles.count < 3 {
-                let errorMsg = "Insufficient images for photogrammetry. Found \(imageFiles.count) images, but need at least 3."
-                print("❌ \(errorMsg)")
+            print("📊 Found \(imageFiles.count) potential images")
+            
+            // Validate image quality and characteristics
+            var validImages: [URL] = []
+            var validationResults: [String] = []
+            
+            for (index, imageURL) in imageFiles.enumerated() {
+                if let validationResult = validateImage(at: imageURL, index: index) {
+                    validImages.append(imageURL)
+                    validationResults.append("✅ \(imageURL.lastPathComponent): \(validationResult)")
+                } else {
+                    validationResults.append("❌ \(imageURL.lastPathComponent): Failed validation")
+                }
+                
+                // Apply max count limit if specified
+                if let maxCount = maxCount, validImages.count >= maxCount {
+                    print("📊 Reached maximum image count (\(maxCount))")
+                    break
+                }
+            }
+            
+            // Print validation summary
+            print("📋 Image Validation Results:")
+            validationResults.prefix(10).forEach { print("  \($0)") }
+            if validationResults.count > 10 {
+                print("  ... and \(validationResults.count - 10) more")
+            }
+            
+            // Check minimum requirements
+            let minImages = 10
+            guard validImages.count >= minImages else {
                 DispatchQueue.main.async {
-                    self.errorMessage = errorMsg
+                    self.errorMessage = "Need at least \(minImages) valid images. Found \(validImages.count)."
                     self.isProcessing = false
                 }
-                return
+                return nil
             }
             
-            // Validate images before starting photogrammetry
-            print("🔍 Validating input images...")
-            var validImageCount = 0
-            let minImageDimension: CGFloat = 640 // Minimum dimension for photogrammetry
-            
-            print("📋 Image validation results (first 5 images):")
-            for (i, url) in imageFiles.prefix(5).enumerated() {
-                let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                let creationDate = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
-                
-                // Try to load the image
-                if let image = UIImage(contentsOfFile: url.path) {
-                    let size = image.size
-                    let isValidSize = size.width >= minImageDimension && size.height >= minImageDimension
-                    let isValidFileSize = fileSize > 1024 // At least 1KB
-                    
-                    if isValidSize && isValidFileSize {
-                        validImageCount += 1
-                        print("  ✅ \(i+1). \(url.lastPathComponent) (Valid: \(Int(size.width))x\(Int(size.height)), \(fileSize) bytes)")
-                    } else {
-                        print("  ⚠️ \(i+1). \(url.lastPathComponent) (Invalid: " +
-                              "\(isValidSize ? "" : "Size too small \(Int(size.width))x\(Int(size.height)) " )" +
-                              "\(isValidFileSize ? "" : "File too small \(fileSize) bytes")")
-                    }
-                } else {
-                    print("  ❌ \(i+1). \(url.lastPathComponent) (Failed to load image)")
-                }
-            }
-            
-            // Check if we have enough valid images
-            let minValidImages = 5 // Minimum number of valid images needed
-            if validImageCount < minValidImages {
-                let errorMsg = "Insufficient valid images. Found \(validImageCount) valid images, but need at least \(minValidImages)."
-                print("❌ \(errorMsg)")
-                throw NSError(domain: "PhotogrammetryError", code: -1, userInfo: [
-                    NSLocalizedDescriptionKey: errorMsg,
-                    NSLocalizedRecoverySuggestionErrorKey: "Please ensure you have at least \(minValidImages) clear, well-lit images with sufficient overlap."
-                ])
-            }
-            
-            print("ℹ️ Starting photogrammetry session with \(validImageCount) valid images")
-            print("ℹ️ Using sample ordering: unordered")
-            
-            // Create photogrammetry session configuration
-            var configuration = PhotogrammetrySession.Configuration()
-            configuration.sampleOrdering = .unordered
-            
-            print("🔄 Creating photogrammetry session...")
-            let session: PhotogrammetrySession
-            
-            do {
-                // Create a session with the configuration
-                print("📊 Initializing PhotogrammetrySession with input directory: \(imageDirectoryURL.path)")
-                session = try PhotogrammetrySession(input: imageDirectoryURL, 
-                                                 configuration: configuration)
-                print("✅ Successfully created photogrammetry session")
-                
-                // Log session configuration
-                print("📋 Session Configuration:")
-                print("  - Sample Ordering: \(configuration.sampleOrdering)")
-                print("  - Feature Sensitivity: \(configuration.featureSensitivity)")
-                
-            } catch let error as NSError {
-                var errorMsg = "Failed to create photogrammetry session: \(error.localizedDescription)"
-                var recoverySuggestion = "Please try again with different images."
-                
-                // Provide more specific error messages for common issues
-                if error.domain == "com.apple.photogrammetry.error" {
-                    switch error.code {
-                    case 1: // Invalid input
-                        errorMsg = "Invalid input directory or images"
-                        recoverySuggestion = "Please check that the input directory contains valid image files."
-                    case 2: // Unsupported format
-                        errorMsg = "Unsupported image format"
-                        recoverySuggestion = "Please use JPG or PNG images with standard color spaces."
-                    case 3: // Insufficient features
-                        errorMsg = "Insufficient image features"
-                        recoverySuggestion = "Try capturing more detailed images with better lighting and overlap."
-                    default:
-                        break
-                    }
-                }
-                
-                print("❌ \(errorMsg)")
-                print("📊 Error domain: \(error.domain)")
-                print("📊 Error code: \(error.code)")
-                
-                throw NSError(domain: error.domain, code: error.code, userInfo: [
-                    NSLocalizedDescriptionKey: errorMsg,
-                    NSLocalizedRecoverySuggestionErrorKey: recoverySuggestion,
-                    NSUnderlyingErrorKey: error
-                ])
-            }
-            
-            // Store the session
-            self.session = session
+            print("✅ Validated \(validImages.count) images for processing")
+            return validImages
             
         } catch {
-            let errorMsg = "❌ Error creating photogrammetry session: \(error.localizedDescription)"
-            print(errorMsg)
             DispatchQueue.main.async {
-                self.errorMessage = errorMsg
+                self.errorMessage = "Error accessing image directory: \(error.localizedDescription)"
                 self.isProcessing = false
             }
-            return
+            return nil
+        }
+    }
+    
+    private func validateImage(at url: URL, index: Int) -> String? {
+        // Check file size
+        guard let fileSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              fileSize > 50_000 else { // At least 50KB
+            return nil
         }
         
-        // Continue with the implementation
-        guard PhotogrammetrySession.isSupported else {
-            let errorMsg = "Photogrammetry is not supported on this device or OS version."
-            print("❌ \(errorMsg)")
-            DispatchQueue.main.async {
-                self.errorMessage = errorMsg
-                self.isProcessing = false
+        // Load and validate image
+        guard let image = UIImage(contentsOfFile: url.path) else {
+            return nil
+        }
+        
+        let size = image.size
+        let minDimension: CGFloat = 1024 // Higher minimum for better quality
+        let maxDimension: CGFloat = 8192 // Reasonable upper limit
+        
+        guard size.width >= minDimension && size.height >= minDimension else {
+            return nil
+        }
+        
+        guard size.width <= maxDimension && size.height <= maxDimension else {
+            return nil
+        }
+        
+        // Check aspect ratio (avoid extremely wide/tall images)
+        let aspectRatio = max(size.width, size.height) / min(size.width, size.height)
+        guard aspectRatio <= 3.0 else {
+            return nil
+        }
+        
+        // Check for potential blur (basic check)
+        if let cgImage = image.cgImage {
+            let context = CIContext()
+            let ciImage = CIImage(cgImage: cgImage)
+            
+            // Simple sharpness check using variance of Laplacian
+            if let sharpnessValue = calculateImageSharpness(ciImage: ciImage, context: context) {
+                guard sharpnessValue > 100 else { // Threshold for acceptable sharpness
+                    return nil
+                }
+                return "\(Int(size.width))x\(Int(size.height)), \(fileSize/1024)KB, sharpness: \(Int(sharpnessValue))"
             }
-            return
+        }
+        
+        return "\(Int(size.width))x\(Int(size.height)), \(fileSize/1024)KB"
+    }
+    
+    private func calculateImageSharpness(ciImage: CIImage, context: CIContext) -> Double? {
+        // Apply Laplacian filter to detect edges (sharpness indicator)
+        guard let filter = CIFilter(name: "CIConvolution3X3") else { return nil }
+        
+        let laplacianKernelFloat: [Float] = [
+            0, -1, 0,
+            -1, 4, -1,
+            0, -1, 0
+        ]
+
+        // Convert Float array to CGFloat array
+        let laplacianKernel = laplacianKernelFloat.map { CGFloat($0) }
+
+        filter.setValue(ciImage, forKey: kCIInputImageKey)
+
+        // Use withUnsafeBufferPointer for safe array access
+        laplacianKernel.withUnsafeBufferPointer { bufferPointer in
+            if let baseAddress = bufferPointer.baseAddress {
+                let ciVector = CIVector(values: baseAddress, count: Int(UInt(laplacianKernel.count)))
+                filter.setValue(ciVector, forKey: "inputWeights")
+            }
         }
 
+ guard let outputImage = filter.outputImage else { return nil }
+        
+        // Calculate variance (higher variance = sharper image)
+        let extent = outputImage.extent
+        let inputExtent = CGRect(x: 0, y: 0, width: min(extent.width, 500), height: min(extent.height, 500))
+        
+        guard let cgImage = context.createCGImage(outputImage, from: inputExtent) else { return nil }
+        
+        // Simple variance calculation on a subset of pixels
+        guard let dataProvider = cgImage.dataProvider,
+              let data = dataProvider.data else { return nil }
+        
+        let bytesPerRow = cgImage.bytesPerRow
+        let bytesPerPixel = cgImage.bitsPerPixel / 8
+        let width = cgImage.width
+        let height = cgImage.height
+        
+        // Convert to UInt8 pointer instead of mixing Float/CGFloat
+        let ptr = CFDataGetBytePtr(data)
+        guard let bytePtr = ptr else { return nil }
+        
+        var sum: Double = 0
+        var sumSquared: Double = 0
+        var count: Int = 0
+        
+        for y in stride(from: 0, to: height, by: 10) {
+            for x in stride(from: 0, to: width, by: 10) {
+                let offset = y * bytesPerRow + x * bytesPerPixel
+                if offset < CFDataGetLength(data) {
+                    let value = Double(bytePtr[offset])  // Direct byte access
+                    sum += value
+                    sumSquared += value * value
+                    count += 1
+                }
+            }
+        }
+        
+        guard count > 0 else { return nil }
+        
+        let mean = sum / Double(count)
+        let variance = (sumSquared / Double(count)) - (mean * mean)
+        
+        return variance
+    }
+
+    
+    private func createOptimizedConfiguration(for options: ProcessingOptions, imageCount: Int) -> PhotogrammetrySession.Configuration {
+        var configuration = PhotogrammetrySession.Configuration()
+        
+        // Set sample ordering based on image count and naming
+        configuration.sampleOrdering = options.sampleOrdering
+        
+        // Adjust feature sensitivity based on image quality
+        configuration.featureSensitivity = options.featureSensitivity
+        
+        // Enable object masking if requested
+        configuration.isObjectMaskingEnabled = options.enableObjectMasking
+        
+        print("📋 Configuration:")
+        print("  - Sample Ordering: \(configuration.sampleOrdering)")
+        print("  - Feature Sensitivity: \(configuration.featureSensitivity)")
+        print("  - Object Masking: \(configuration.isObjectMaskingEnabled)")
+        
+        return configuration
+    }
+    
+    private func createPhotogrammetrySession(with configuration: PhotogrammetrySession.Configuration,
+                                           imageDirectory: URL,
+                                           outputFileName: String,
+                                           options: ProcessingOptions) {
+        
         // Reset state
         DispatchQueue.main.async {
             self.progress = 0.0
             self.generatedModelURL = nil
             self.errorMessage = nil
             self.isProcessing = true
+            self.processingStage = "Initializing..."
         }
-
-        var configuration = PhotogrammetrySession.Configuration()
-        // Configure detail level, sample ordering etc. if needed
-        // configuration.sampleOrdering = .sequential // if images are named sequentially and in order
-        // configuration.featureSensitivity = .normal
-        // configuration.isObjectMaskingEnabled = false // if you don't have object masks
-
-        print("PhotogrammetryService: Attempting to create session with input directory: \(imageDirectoryURL.path)")
-        var isDirectory: ObjCBool = false
-        let directoryExists = FileManager.default.fileExists(atPath: imageDirectoryURL.path, isDirectory: &isDirectory)
-        print("PhotogrammetryService: Input directory exists: \(directoryExists), Is a directory: \(isDirectory.boolValue)")
         
-        if directoryExists && isDirectory.boolValue {
-            do {
-                let contents = try FileManager.default.contentsOfDirectory(at: imageDirectoryURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)
-                print("PhotogrammetryService: Directory contents (first 10): \(contents.map { $0.lastPathComponent }.prefix(10))")
-                if contents.isEmpty {
-                    print("PhotogrammetryService: WARNING - Input directory is empty!")
-                }
-            } catch {
-                print("PhotogrammetryService: Error listing directory contents: \(error)")
-            }
-        } else {
-            print("PhotogrammetryService: WARNING - Input directory does not exist or is not a directory.")
-        }
-
         do {
-            // print("Initializing PhotogrammetrySession with input: \(imageDirectoryURL.path)") // Already printed above
-            session = try PhotogrammetrySession(input: imageDirectoryURL, configuration: configuration)
-            print("PhotogrammetryService: Session successfully initialized.")
-        } catch {
-            DispatchQueue.main.async {
-                self.errorMessage = "Failed to create PhotogrammetrySession: \(error.localizedDescription)"
-                self.isProcessing = false
+            session = try PhotogrammetrySession(input: imageDirectory, configuration: configuration)
+            print("✅ Photogrammetry session created successfully")
+            
+            let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            let finalOutputFileName = outputFileName.hasSuffix(".usdz") ? outputFileName : "\(outputFileName).usdz"
+            currentOutputURL = documentsDirectory.appendingPathComponent(finalOutputFileName)
+            
+            guard let outputURL = currentOutputURL else {
+                throw NSError(domain: "PhotogrammetryError", code: -1,
+                             userInfo: [NSLocalizedDescriptionKey: "Could not create output URL"])
             }
-            print("Error creating PhotogrammetrySession: \(error)")
-            return
-        }
-
-        guard let session = session else {
-            DispatchQueue.main.async { self.isProcessing = false }
-            return
-        }
-
-        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        // Ensure the output file name has .usdz extension
-        let finalOutputFileName = outputFileName.hasSuffix(".usdz") ? outputFileName : "\(outputFileName).usdz"
-        currentOutputURL = documentsDirectory.appendingPathComponent(finalOutputFileName)
-        
-        guard let outputURL = currentOutputURL else {
-            DispatchQueue.main.async {
-                self.errorMessage = "Could not construct output URL."
-                self.isProcessing = false
-            }
-            return
-        }
-
-        // Delete existing file if any, to prevent PhotogrammetrySession from potentially failing or appending
-        if FileManager.default.fileExists(atPath: outputURL.path) {
-            do {
+            
+            // Remove existing file
+            if FileManager.default.fileExists(atPath: outputURL.path) {
                 try FileManager.default.removeItem(at: outputURL)
-                print("Removed existing file at: \(outputURL.path)")
-            } catch {
-                DispatchQueue.main.async {
-                    self.errorMessage = "Failed to remove existing output file: \(error.localizedDescription)"
-                    self.isProcessing = false
-                }
-                print("Error removing existing file: \(error)")
-                return
             }
-        }
-        
-        print("Photogrammetry session configured. Output will be at: \(outputURL.path)")
-
-        sessionTask = Task {
-            do {
-                print("Starting to iterate through session outputs.")
-                for try await output in session.outputs {
-                    if Task.isCancelled {
-                        print("Photogrammetry task cancelled during output processing.")
-                        DispatchQueue.main.async { self.isProcessing = false }
-                        return
+            
+            // Start processing with memory management
+            sessionTask = Task { @MainActor in
+                do {
+                    for try await output in session!.outputs {
+                        if Task.isCancelled {
+                            print("🛑 Processing cancelled")
+                            self.isProcessing = false
+                            return
+                        }
+                        
+                        // Process output with autoreleasepool for memory management
+                        autoreleasepool {
+                            self.handleSessionOutput(output, for: outputURL)
+                        }
                     }
-                    handleSessionOutput(output, for: outputURL)
-                }
-                print("Finished iterating session outputs.")
-                // If the loop finishes without .processingComplete or .requestComplete with a URL, it might be an issue.
-                // However, .processingComplete should be the final state for a successful run with .modelFile request.
-            } catch {
-                print("Photogrammetry session error during output processing: \(error.localizedDescription)")
-                DispatchQueue.main.async {
-                    self.errorMessage = "Session error: \(error.localizedDescription)"
+                } catch {
+                    self.errorMessage = "Processing error: \(error.localizedDescription)"
                     self.isProcessing = false
+                    print("❌ Session error: \(error)")
                 }
             }
-        }
-
-        // Start processing by requesting the model file
-        do {
-            let request = PhotogrammetrySession.Request.modelFile(url: outputURL, detail: detailLevel)
-            print("Submitting modelFile request to session for URL: \(outputURL.path) with detail: \(detailLevel)")
-            try session.process(requests: [request])
-        } catch {
-            print("Failed to submit processing request: \(error.localizedDescription)")
+            
+            // Submit processing request
+            let request = PhotogrammetrySession.Request.modelFile(url: outputURL, detail: options.detailLevel)
+            try session?.process(requests: [request])
+            
             DispatchQueue.main.async {
-                self.errorMessage = "Failed to start processing: \(error.localizedDescription)"
+                self.processingStage = "Processing \(options.detailLevel) quality model..."
+            }
+            
+        } catch {
+            DispatchQueue.main.async {
+                self.errorMessage = "Failed to create session: \(error.localizedDescription)"
                 self.isProcessing = false
             }
         }
     }
-
+    
     private func handleSessionOutput(_ output: PhotogrammetrySession.Output, for expectedOutputURL: URL) {
         switch output {
         case .processingComplete:
-            print("Photogrammetry: Processing complete.")
-            // This case indicates all requests are done.
-            // Check if the output file exists and is valid
-            let fileManager = FileManager.default
+            print("✅ Photogrammetry: Processing complete")
+            validateAndFinalizeOutput(at: expectedOutputURL)
             
-            DispatchQueue.main.async {
-                if fileManager.fileExists(atPath: expectedOutputURL.path) {
-                    let fileSize = (try? fileManager.attributesOfItem(atPath: expectedOutputURL.path)[.size] as? Int64) ?? 0
-                    print("✅ Output file exists at \(expectedOutputURL.path)")
-                    print("📦 File size: \(fileSize) bytes")
-                    
-                    if fileSize > 1024 { // 1KB minimum size for a valid USDZ file
-                        self.generatedModelURL = expectedOutputURL
-                        print("✅ Successfully generated USDZ model")
-                    } else {
-                        self.errorMessage = "Generated file is too small (\(fileSize) bytes). The photogrammetry process may not have had enough data."
-                        print("❌ Error: \(self.errorMessage!)")
-                        // Clean up the invalid file
-                        try? fileManager.removeItem(at: expectedOutputURL)
-                    }
-                } else {
-                    self.errorMessage = "Processing complete, but output file not found at expected location."
-                    print("❌ Error: \(self.errorMessage!)")
-                    
-                    // Check if there's a temporary file that might contain error information
-                    let tempDir = fileManager.temporaryDirectory
-                    do {
-                        let tempFiles = try fileManager.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
-                        let logFiles = tempFiles.filter { $0.pathExtension == "log" }
-                        
-                        if !logFiles.isEmpty {
-                            print("🔍 Found log files that might contain error information:")
-                            for logFile in logFiles.prefix(3) {
-                                print(" - \(logFile.lastPathComponent)")
-                                if let logContents = try? String(contentsOf: logFile, encoding: .utf8) {
-                                    print("   Last 3 lines:\n" + logContents.components(separatedBy: "\n").suffix(3).joined(separator: "\n"))
-                                }
-                            }
-                        }
-                    } catch {
-                        print("⚠️ Could not check for log files: \(error.localizedDescription)")
-                    }
-                }
-                
-                self.progress = 1.0
-                self.isProcessing = false
-            }
-
         case .requestError(let request, let error):
-            let errorMessage = "Photogrammetry request failed: \(error.localizedDescription)"
-            print("❌ Error: \(errorMessage)")
-            print("📝 Request details: \(request)")
+            handleProcessingError(request: request, error: error)
             
-            // Log additional error information if available
-            let nsError = error as NSError
-            print("📊 Error domain: \(nsError.domain)")
-            print("📊 Error code: \(nsError.code)")
-            if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
-                print("📊 Underlying error: \(underlyingError.localizedDescription)")
-                print("📊 Underlying error domain: \(underlyingError.domain)")
-                print("📊 Underlying error code: \(underlyingError.code)")
-            }
-            
-            // Provide more user-friendly error messages for common issues
-            var userFriendlyMessage = error.localizedDescription
-            if nsError.domain == "com.apple.photogrammetry.error" {
-                switch nsError.code {
-                case 3505: // Common error code for insufficient features
-                    userFriendlyMessage = "Not enough visual features in the images. Try capturing more detailed images with better lighting and overlap."
-                case 4011: // Common error code for processing failure
-                    userFriendlyMessage = "Processing failed. The images may be too similar, blurry, or lack sufficient overlap."
-                default:
-                    break
-                }
-            }
-            
-            DispatchQueue.main.async {
-                self.errorMessage = userFriendlyMessage
-                self.isProcessing = false
-            }
-
         case .requestComplete(let request, let result):
-            print("✅ Photogrammetry: Request complete for \(request).")
-            if case .modelFile(let url) = result {
-                let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-                print("📦 Generated model file at: \(url.path)")
-                print("📏 File size: \(fileSize) bytes")
-                
-                if fileSize > 1024 { // 1KB minimum size for a valid USDZ file
+            handleRequestComplete(request: request, result: result)
+            
+        case .requestProgress(let request, let fractionComplete):
+            updateProgress(for: request, progress: fractionComplete)
+            
+        case .inputComplete:
+            DispatchQueue.main.async {
+                self.processingStage = "All images processed, generating model..."
+            }
+            
+        case .invalidSample(let id, let reason):
+            print("⚠️ Invalid sample \(id): \(reason)")
+            
+        case .skippedSample(let id):
+            print("⚠️ Skipped sample \(id)")
+            
+        case .automaticDownsampling:
+            print("ℹ️ Automatic downsampling applied")
+            DispatchQueue.main.async {
+                self.processingStage = "Images automatically downsampled for processing"
+            }
+            
+        @unknown default:
+            print("⚠️ Unknown photogrammetry output: \(output)")
+        }
+    }
+    
+    private func updateProgress(for request: PhotogrammetrySession.Request, progress: Double) {
+        DispatchQueue.main.async {
+            self.progress = progress
+            
+            // Update stage based on progress
+            if progress < 0.3 {
+                self.processingStage = "Analyzing images..."
+            } else if progress < 0.6 {
+                self.processingStage = "Building 3D structure..."
+            } else if progress < 0.9 {
+                self.processingStage = "Generating textures..."
+            } else {
+                self.processingStage = "Finalizing model..."
+            }
+        }
+    }
+    
+    private func handleProcessingError(request: PhotogrammetrySession.Request, error: Error) {
+        let errorMessage = "Photogrammetry request failed: \(error.localizedDescription)"
+        print("❌ Error: \(errorMessage)")
+        print("📝 Request details: \(request)")
+        
+        let nsError = error as NSError
+        print("📊 Error domain: \(nsError.domain)")
+        print("📊 Error code: \(nsError.code)")
+        
+        // Provide more user-friendly error messages for common issues
+        var userFriendlyMessage = error.localizedDescription
+        if nsError.domain == "com.apple.photogrammetry.error" {
+            switch nsError.code {
+            case 3505:
+                userFriendlyMessage = "Not enough visual features in the images. Try capturing more detailed images with better lighting and overlap."
+            case 4011:
+                userFriendlyMessage = "Processing failed. The images may be too similar, blurry, or lack sufficient overlap."
+            default:
+                break
+            }
+        }
+        
+        DispatchQueue.main.async {
+            self.errorMessage = userFriendlyMessage
+            self.isProcessing = false
+        }
+    }
+    
+    private func handleRequestComplete(request: PhotogrammetrySession.Request, result: PhotogrammetrySession.Result) {
+        print("✅ Photogrammetry: Request complete for \(request).")
+        if case .modelFile(let url) = result {
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+            print("📦 Generated model file at: \(url.path)")
+            print("📏 File size: \(fileSize) bytes")
+            
+            if fileSize > 10_000 { // 10KB minimum for valid USDZ
+                if validateUSDZFile(at: url) {
                     DispatchQueue.main.async {
                         self.generatedModelURL = url
                         self.progress = 1.0
                         self.isProcessing = false
+                        self.processingStage = "Model generation complete!"
                         print("✅ Successfully completed USDZ generation")
                     }
                 } else {
-                    let errorMsg = "Generated file is too small (\(fileSize) bytes). The photogrammetry process may not have had enough data."
+                    let errorMsg = "Generated file appears to be corrupted"
                     print("❌ Error: \(errorMsg)")
-                    try? FileManager.default.removeItem(at: url) // Clean up invalid file
+                    try? FileManager.default.removeItem(at: url)
                     DispatchQueue.main.async {
                         self.errorMessage = errorMsg
                         self.isProcessing = false
                     }
                 }
             } else {
-                print("ℹ️ Photogrammetry: Request completed with result: \(result)")
+                let errorMsg = "Generated file is too small (\(fileSize) bytes). The photogrammetry process may not have had enough data."
+                print("❌ Error: \(errorMsg)")
+                try? FileManager.default.removeItem(at: url)
+                DispatchQueue.main.async {
+                    self.errorMessage = errorMsg
+                    self.isProcessing = false
+                }
             }
-
-        case .requestProgress(let request, let fractionComplete):
-            // print("Photogrammetry: Progress for \(request): \(fractionComplete)") // Can be very verbose
-            DispatchQueue.main.async {
-                self.progress = fractionComplete
-            }
-
-        case .inputComplete:
-            print("Photogrammetry: All input images have been consumed.")
-
-        case .invalidSample(let id, let reason):
-            print("Photogrammetry: Invalid sample ID \(id), reason: \(reason)")
-            // Optionally, collect these to inform the user, but don't stop processing for one bad image.
-
-        case .skippedSample(let id):
-            print("Photogrammetry: Skipped sample ID \(id).")
-
-        case .automaticDownsampling:
-            print("Photogrammetry: Automatic downsampling was applied to input images.")
-            
-        @unknown default:
-            print("Photogrammetry: Received an unknown PhotogrammetrySession.Output case.")
-        }
-    }
-
-    func cancelProcessing() {
-        print("Attempting to cancel photogrammetry processing...")
-        sessionTask?.cancel()
-        session = nil // Release the session reference, it will tear itself down.
-        DispatchQueue.main.async {
-            self.isProcessing = false
-            self.progress = 0.0
-            // Don't clear errorMessage or generatedModelURL here, user might want to see the last state.
-            print("Photogrammetry processing cancelled by user.")
+        } else {
+            print("ℹ️ Photogrammetry: Request completed with result: \(result)")
         }
     }
     
-    // Helper to provide a description for the request type (optional)
-    // private func description(for request: PhotogrammetrySession.Request) -> String {
-    //     switch request.type {
-    //     case .modelFile: return "ModelFile"
-    //     // Add other cases if you use other request types
-    //     default: return "UnknownRequestType"
-    //     }
-    // }
+    private func validateAndFinalizeOutput(at url: URL) {
+        let fileManager = FileManager.default
+        
+        DispatchQueue.main.async {
+            if fileManager.fileExists(atPath: url.path) {
+                let fileSize = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+                
+                if fileSize > 10_000 { // 10KB minimum for valid USDZ
+                    // Perform additional validation
+                    if self.validateUSDZFile(at: url) {
+                        self.generatedModelURL = url
+                        self.processingStage = "Model generation complete!"
+                        print("✅ Generated valid USDZ: \(fileSize/1024)KB")
+                    } else {
+                        self.errorMessage = "Generated file appears to be corrupted"
+                        try? fileManager.removeItem(at: url)
+                    }
+                } else {
+                    self.errorMessage = "Generated file is too small (\(fileSize) bytes)"
+                    try? fileManager.removeItem(at: url)
+                }
+            } else {
+                self.errorMessage = "Output file not found at expected location"
+            }
+            
+            self.progress = 1.0
+            self.isProcessing = false
+        }
+    }
+    
+    private func validateUSDZFile(at url: URL) -> Bool {
+        // Basic USDZ validation
+        do {
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            
+            // Check for USD/USDZ magic bytes or ZIP signature
+            let header = data.prefix(4)
+            let zipSignature = Data([0x50, 0x4B, 0x03, 0x04]) // ZIP file signature
+            let usdSignature = "PXR-".data(using: .ascii) ?? Data()
+            
+            return header == zipSignature || data.starts(with: usdSignature)
+        } catch {
+            print("❌ Error validating USDZ file: \(error)")
+            return false
+        }
+    }
+    
+    func cancelProcessing() {
+        print("Attempting to cancel photogrammetry processing...")
+        sessionTask?.cancel()
+        session = nil
+        DispatchQueue.main.async {
+            self.isProcessing = false
+            self.progress = 0.0
+            print("Photogrammetry processing cancelled by user.")
+        }
+    }
 }
