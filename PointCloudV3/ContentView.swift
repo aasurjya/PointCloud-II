@@ -330,7 +330,7 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
     var enhancedFrames = [EnhancedCapturedFrame]()
     
     private var collectingFrames = false
-    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private let ciContext: CIContext
     
     private var lastFrameCaptureTime: TimeInterval = 0
     private let desiredFrameCaptureInterval: TimeInterval = 0.1 // ~10 FPS
@@ -346,7 +346,14 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
 
     init(arViewModel: ARViewModel) {
         self.arViewModel = arViewModel
-        
+
+        // Reuse a CIContext with CPU rendering to avoid heavy allocations each frame
+        let contextOptions: [CIContextOption: Any] = [
+            .useSoftwareRenderer: true,
+            .cacheIntermediates: false
+        ]
+        self.ciContext = CIContext(options: contextOptions)
+
         // Initialize enhanced frame capture
         self.frameCapture = EnhancedFrameCapture(captureHighRes: true, captureDepth: true)
     }
@@ -451,22 +458,11 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
                 // Create a downsampled image for memory efficiency but retain quality
                 let pixelBuffer = arFrame.capturedImage
                 let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-                
-                // Process the image in a way that doesn't consume too much memory
-                // Use lower quality for preview, higher for storage
+
                 let colorSpace = CGColorSpaceCreateDeviceRGB()
-                let options: [CIContextOption: Any] = [
-                    .useSoftwareRenderer: true,            // Use CPU instead of GPU
-                    .workingColorSpace: colorSpace,        // Ensure consistent color space
-                    .cacheIntermediates: false,            // Don't cache intermediate results
-                    .highQualityDownsample: false          // Use faster downsampling
-                ]
-                
-                // Create a CIContext - CIContext initializer returns non-optional
-                let localCIContext = CIContext(options: options)
-                
-                // Create the CGImage which can be optional
-                guard let cgImage = localCIContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: colorSpace) else {
+
+                // Use the shared CIContext to avoid creating a new context each frame
+                guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: colorSpace) else {
                     print("❌ Failed to convert camera image for \(arFrame.timestamp)")
                     return
                 }
@@ -496,11 +492,8 @@ class ARSessionDelegateCoordinator: NSObject, ARSessionDelegate {
                 // Fallback to memory-only storage with an extremely strict limit
                 let pixelBuffer = arFrame.capturedImage
                 let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-                
-                // Use a local context to avoid keeping resources around
-                let localCIContext = CIContext(options: [.useSoftwareRenderer: true, .cacheIntermediates: false])
-                
-                guard let cgImage = localCIContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
+
+                guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
                     print("❌ Failed to convert camera image for \(arFrame.timestamp)")
                     return
                 }
