@@ -506,12 +506,16 @@ class DensePointCloudGenerator {
         let bytesPerRow = frame.image.bytesPerRow
         let bytesPerPixel = frame.image.bitsPerPixel / 8
         
-        // Debug info
+        // Debug info - only log in debug builds to reduce overhead
+#if DEBUG
         print("Image format: \(frame.image.width)x\(frame.image.height), BPP: \(bytesPerPixel), Alpha: \(frame.image.alphaInfo.rawValue)")
+#endif
         
         // Ensure we have compatible pixel format
         if bytesPerPixel < 3 {
+            #if DEBUG
             print("Incompatible image format - \(bytesPerPixel) bytes per pixel")
+            #endif
             return SIMD3<UInt8>(0, 255, 0) // Green for format errors
         }
         
@@ -588,11 +592,12 @@ class DensePointCloudGenerator {
         let g = UInt8(min(255, max(0, final_g)))
         let b = UInt8(min(255, max(0, final_b)))
         
-        // Sanity check - if all white, log a warning (for debugging)
+        // Sanity check - log occasionally in debug builds
+#if DEBUG
         if r > 240 && g > 240 && b > 240 && (arc4random_uniform(100) < 10) {
-            // Only log occasionally
             print("WARNING: Sampled color is very bright (\(r),\(g),\(b)) for point \(worldPoint), uv: (\(u_exact),\(v_exact))")
         }
+#endif
         
         return SIMD3<UInt8>(r, g, b)
     }
